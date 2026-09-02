@@ -204,6 +204,10 @@ live `opencode2` (spike S6).
   recorded as a failure instead of being passed on.
 - `ctx.agent.list()` resolves to `{ location, data: Agent.Info[] }`, not to a plain array.
   An `Agent.Info` carries `id`, `name`, and `mode` (`subagent`, `primary`, or `all`).
+- `ctx.plugin.list()` resolves to `{ location, data: Plugin.Info[] }`, the shape
+  `ctx.agent.list()` uses. A `Plugin.Info` carries an optional `id`, a `source`, `features`,
+  and `state`, which is `{ status: "active" }` or `{ status: "failed", error }`. A plugin that
+  threw on load is listed with that error, so a failed load is visible.
 - `ctx.session.context({ sessionID })` returns the message history. A message uses `type`,
   not `role`, and an assistant message keeps its text in `content: [{ type: "text", text }]`.
 - `Session.Info.outcome` is `succeeded`, `failed`, or `interrupted`, and is only set once
@@ -232,6 +236,10 @@ live `opencode2` (spike S6).
   cancelled, and it is not tried again, because a new attempt would only ask the same
   question once more. In a `team` phase the member also mails the lead one question, which
   goes through the normal gate, cap, and wake policy, so nothing is sent outside one.
+- `workflow_doctor` finds the `opencode-permissions-classifier` plugin by its id in
+  `ctx.plugin.list()`, because that plugin registers no tool, no command, and no event to
+  look for. It decides an ask in the `permission.evaluate` hook, which core runs before it
+  publishes `permission.asked`, so an ask it allows or denies leaves the task's `asked` empty.
 - A resume takes `guidance`, a task id to a text, which is kept on the task record and put
   at the end of that task's prompt in the `<untrusted>` envelope. It is how a rejected
   permission is answered: the report and the status name the task to guide. An id the run

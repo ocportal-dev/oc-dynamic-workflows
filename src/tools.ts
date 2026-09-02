@@ -29,7 +29,12 @@ export interface ToolDeps {
   mailbox: Mailbox
   /** `ctx.agent.list`. Missing means the agent cannot be checked. */
   agents?: () => Promise<unknown>
+  /** `ctx.plugin.list`. Missing means the permission classifier cannot be checked. */
+  plugins?: () => Promise<unknown>
 }
+
+/** The sibling plugin that reviews a permission ask. It registers nothing else to look for. */
+const CLASSIFIER_ID = "opencode-permissions-classifier"
 
 export type WorkflowTool = Info
 
@@ -332,7 +337,8 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       description: [
         "Use when a run will not start, or when the user asks why workflows are not working. Call it first.",
         "Check the workflow engine before a run: the subagent executor, the default agent,",
-        "the plugin options, the saved specs that do not parse, and the runs still marked running.",
+        "the permission classifier, the plugin options, the saved specs that do not parse,",
+        "and the runs still marked running.",
       ].join("\n"),
       input: z.object({}),
       output: Outcome,
@@ -453,6 +459,7 @@ function mailOut(mail: MailEvent): {
 type Doctor = {
   executor: "available" | "missing"
   defaultAgent: { name: string; state: "subagent" | "primary" | "all" | "missing" | "unknown" }
+  classifier: { state: "active" | "failed" | "absent" | "unknown"; error?: string }
   warnings: string[]
   invalidSpecs: { name: string; error: string }[]
   runningRuns: { runId: string; name: string; ageMinutes: number }[]
@@ -487,6 +494,7 @@ async function diagnose(deps: ToolDeps): Promise<Doctor> {
   return {
     executor: deps.spawner.available() ? "available" : "missing",
     defaultAgent: { name: deps.config.defaultAgent, state: await agentState(deps) },
+    classifier: await classifierState(deps),
     warnings: deps.warnings,
     invalidSpecs,
     runningRuns,
@@ -512,10 +520,40 @@ async function agentState(deps: ToolDeps): Promise<Doctor["defaultAgent"]["state
   return "unknown"
 }
 
+/**
+ * The classifier registers no tool, no command, and no event, so the plugin list is the only
+ * place it shows. A host that lists nothing reports "unknown" instead of "absent".
+ */
+async function classifierState(deps: ToolDeps): Promise<Doctor["classifier"]> {
+  if (!deps.plugins) return { state: "unknown" }
+  const listed = await deps.plugins().catch(() => undefined)
+  const data = (listed as { data?: unknown } | undefined)?.data
+  const array = Array.isArray(listed) ? listed : Array.isArray(data) ? data : undefined
+  if (!array) return { state: "unknown" }
+  const found = array
+    .map((entry) => entry as { id?: unknown; state?: { status?: unknown; error?: unknown } })
+    .find((entry) => entry.id === CLASSIFIER_ID)
+  if (!found) return { state: "absent" }
+  if (found.state?.status === "failed") return { state: "failed", error: String(found.state.error ?? "") }
+  return { state: "active" }
+}
+
+/** What each classifier state means for a member's permission ask. */
+const CLASSIFIER_NOTES: Record<Doctor["classifier"]["state"], string> = {
+  active:
+    "a member permission ask is reviewed before it is shown; an ask the classifier allows or denies" +
+    " leaves no trace on the task, and one it escalates waits for the user on the lead's screen",
+  absent: "every member permission ask waits for the user on the lead's screen",
+  failed: "the classifier did not load, so every member permission ask waits for the user on the lead's screen",
+  unknown: "the host did not list its plugins, so the classifier cannot be checked",
+}
+
 function renderDoctor(doctor: Doctor): string {
   const lines = [
     `subagent executor: ${doctor.executor}`,
     `default agent: ${doctor.defaultAgent.name} (${doctor.defaultAgent.state})`,
+    `permission classifier: ${doctor.classifier.state}${doctor.classifier.error ? ` (${doctor.classifier.error})` : ""}`,
+    `  ${CLASSIFIER_NOTES[doctor.classifier.state]}`,
     `storage key prefix: ${doctor.storagePrefix}`,
   ]
   if (doctor.executor === "missing") lines.push("  no member session can be started without the subagent tool")

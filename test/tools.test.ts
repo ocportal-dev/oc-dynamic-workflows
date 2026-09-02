@@ -2,7 +2,9 @@ import { expect, it } from "bun:test"
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { resolveConfig } from "../src/config.js"
 import { wrapUntrusted } from "../src/report.js"
+import { type ToolDeps, workflowTools } from "../src/tools.js"
 import { LEAD, startPlugin, tick, waitForSpawn } from "./fake.js"
 
 /** One team phase with one task, so the run spawns exactly one child session. */
@@ -14,6 +16,27 @@ const SPEC = {
 }
 
 const MEMBER = "ses_member"
+
+/** The doctor reads only these deps, so a direct build can vary the plugin list alone. */
+async function runDoctor(plugins: (() => Promise<unknown>) | undefined): Promise<{
+  content: unknown
+  classifier: unknown
+}> {
+  const tools = workflowTools({
+    config: resolveConfig({}).config,
+    warnings: [],
+    directory: "/project",
+    spawner: { available: () => true },
+    runs: { list: async () => [], prefix: () => "proj1" },
+    plugins,
+  } as unknown as ToolDeps)
+  const doctor = tools.find((tool) => tool.name === "workflow_doctor")!
+  const result = (await doctor.execute({} as never, {} as never)) as {
+    content: unknown
+    output: { doctor: { classifier: unknown } }
+  }
+  return { content: result.content, classifier: result.output.doctor.classifier }
+}
 
 /** Starts a run so the lead is known, then adds a child session under that lead. */
 async function withMember(fake: Awaited<ReturnType<typeof startPlugin>>): Promise<string> {
@@ -106,6 +129,57 @@ it("reads the mode of the default agent from the agent list", async () => {
   fake.agents.push({ name: "executor", mode: "subagent" })
   const doctor = ((await fake.run("workflow_doctor", {})).output as { doctor: { defaultAgent: unknown } }).doctor
   expect(doctor.defaultAgent).toEqual({ name: "general", state: "subagent" })
+})
+
+it("reports the permission classifier as absent when the host lists no classifier", async () => {
+  const fake = await startPlugin()
+  const result = await fake.run("workflow_doctor", {})
+  const doctor = (result.output as { doctor: { classifier: unknown } }).doctor
+  expect(doctor.classifier).toEqual({ state: "absent" })
+  expect(result.content).toContain("permission classifier: absent")
+  expect(result.content).toContain("every member permission ask waits for the user on the lead's screen")
+})
+
+it("reports the permission classifier as active when the host lists it", async () => {
+  const fake = await startPlugin()
+  fake.plugins.push({
+    id: "opencode-permissions-classifier",
+    source: { type: "local", path: "/x" },
+    state: { status: "active" },
+    features: { server: true },
+  })
+  const result = await fake.run("workflow_doctor", {})
+  const doctor = (result.output as { doctor: { classifier: unknown } }).doctor
+  expect(doctor.classifier).toEqual({ state: "active" })
+  expect(result.content).toContain("permission classifier: active")
+  expect(result.content).toContain("leaves no trace on the task")
+})
+
+it("reports a permission classifier that did not load with its error", async () => {
+  const fake = await startPlugin()
+  fake.plugins.push({
+    id: "opencode-permissions-classifier",
+    source: { type: "local", path: "/x" },
+    state: { status: "failed", error: "boom" },
+    features: { server: true },
+  })
+  const result = await fake.run("workflow_doctor", {})
+  const doctor = (result.output as { doctor: { classifier: unknown } }).doctor
+  expect(doctor.classifier).toEqual({ state: "failed", error: "boom" })
+  expect(result.content).toContain("permission classifier: failed (boom)")
+})
+
+it("cannot check the permission classifier when the plugin list fails", async () => {
+  const result = await runDoctor(async () => {
+    throw new Error("no list")
+  })
+  expect(result.classifier).toEqual({ state: "unknown" })
+  expect(result.content).toContain("the classifier cannot be checked")
+})
+
+it("cannot check the permission classifier without a plugin list", async () => {
+  const result = await runDoctor(undefined)
+  expect(result.classifier).toEqual({ state: "unknown" })
 })
 
 it("hashes the directory when the project id is global", async () => {

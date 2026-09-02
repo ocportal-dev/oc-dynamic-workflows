@@ -63,6 +63,7 @@ export default Plugin.define({
       roster,
       mailbox,
       agents: () => ctx.agent.list(),
+      plugins: () => ctx.plugin.list(),
     })
     // The host replays the transform on every reload, so the probe result is reported once.
     let reported = false

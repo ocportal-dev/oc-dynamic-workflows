@@ -87,6 +87,8 @@ function makeWorld() {
   const messages = new Map<string, unknown[]>()
   const generated: { prompt: string }[] = []
   const agents: { name: string; mode: string }[] = [{ name: "general", mode: "subagent" }]
+  /** What `ctx.plugin.list` answers. A test pushes the entry of a plugin it wants seen. */
+  const plugins: Record<string, unknown>[] = []
   const queue: unknown[] = []
   const flight = { now: 0, max: 0 }
   let wake: (() => void) | undefined
@@ -250,6 +252,7 @@ function makeWorld() {
     generated,
     generate,
     agents,
+    plugins,
     flight,
     emit,
     subagent,
@@ -365,6 +368,7 @@ export async function startPlugin(
     generate: world.generate,
     // The host answers `{ location, data }`, not a plain array.
     agent: { list: async () => ({ location: {}, data: world.agents }) },
+    plugin: { list: async () => ({ location: {}, data: world.plugins }) },
     event: { subscribe: world.subscribe },
     command: {
       transform: async (callback: (draft: unknown) => void) => {

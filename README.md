@@ -78,7 +78,7 @@ An invalid value logs a warning and falls back to the default. The plugin still 
 | `workflow_resume` | `runId`, `overrides?` | Starts what a run has left, under the same run id |
 | `workflow_list` | — | The saved workflow names |
 | `workflow_show` | `name` | The JSON of one saved workflow |
-| `workflow_doctor` | — | The health of the engine: executor, default agent, option warnings, saved specs that do not parse, runs still marked running, and the storage key prefix |
+| `workflow_doctor` | — | The health of the engine: executor, default agent, whether the permission classifier plugin is loaded, option warnings, saved specs that do not parse, runs still marked running, and the storage key prefix |
 | `team_send` | `type`, `body`, `ref?` | Members only: sends one message to the lead of the run |
 | `team_steer` | `taskId`, `body`, `force?` | Leads only: sends one instruction to a member |
 | `team_inbox` | `runId?` | Leads only: the unread mail, marked read, plus the roster |
@@ -285,7 +285,10 @@ hand. A name may only contain letters, digits, `.`, `_`, and `-`.
    none, is interrupted and is not sent again. A task whose permission ask you rejected
    fails with `permission rejected by the user: <action> <resource>` and is not tried
    again; while a task waits for your answer, its status line says what it asked for.
-   Resume it with `guidance` for that task. See "Resume".
+   Resume it with `guidance` for that task. See "Resume". With the
+   `opencode-permissions-classifier` plugin active, an ask it allows or denies is answered
+   before you see it and never reaches the run record; `workflow_doctor` reports whether
+   that plugin is loaded.
 6. When a phase sets `synthesisPrompt`, the outputs of the phase are joined into one
    summary by a transient generation. Only that summary travels to the later phases.
 7. A run that passes `maxRunMinutes` drops the remaining work and ends as `partial`.
