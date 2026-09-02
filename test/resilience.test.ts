@@ -16,7 +16,7 @@ const TEAM: WorkflowSpec = {
       id: "work",
       strategy: "team",
       mailbox: { peers: false, maxMessages: 20 },
-      tasks: [{ id: "a", kind: "agent", prompt: "do a", retries: 0 }],
+      tasks: [{ id: "a", kind: "agent", prompt: "do a", retries: 0, keep: false }],
     },
   ],
 }

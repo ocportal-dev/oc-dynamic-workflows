@@ -148,10 +148,16 @@ export class RunStore {
     await this.put(run)
   }
 
-  /** A mirror is a convenience for debugging, so a write failure is ignored. */
+  /**
+   * A mirror is a convenience for debugging, so a write failure is ignored.
+   *
+   * It lands in the home of the run, which is the directory of the session that started
+   * it, not the directory of the instance that built this store.
+   */
   async #mirror(run: RunRecord): Promise<void> {
-    if (!this.#directory) return
-    const directory = join(this.#directory, ".opencode", "workflows", "runs")
+    const home = run.directory ?? this.#directory
+    if (!home) return
+    const directory = join(home, ".opencode", "workflows", "runs")
     try {
       await mkdir(directory, { recursive: true })
       await writeFile(join(directory, `${run.runId}.json`), `${JSON.stringify(run, null, 2)}\n`, "utf8")

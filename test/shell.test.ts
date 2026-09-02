@@ -13,7 +13,7 @@ function shellSpec(command: string): WorkflowSpec {
     specVersion: 1,
     name: "shell",
     goal: "run a command",
-    phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "shell", command, retries: 0 }] }],
+    phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "shell", command, retries: 0, keep: false }] }],
   }
 }
 
@@ -84,8 +84,8 @@ it("refuses to resume a run whose spec no longer validates", async () => {
         id: "p",
         strategy: "sequential",
         tasks: [
-          { id: "a", kind: "agent", prompt: "go", retries: 0 },
-          { id: "b", kind: "shell", command: "echo hi", retries: 0 },
+          { id: "a", kind: "agent", prompt: "go", retries: 0, keep: false },
+          { id: "b", kind: "shell", command: "echo hi", retries: 0, keep: false },
         ],
       },
     ],

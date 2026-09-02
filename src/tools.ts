@@ -15,7 +15,12 @@ export interface ToolDeps {
   config: WorkflowConfig
   /** The warnings `resolveConfig` produced. `workflow_doctor` reports them. */
   warnings: string[]
-  /** The project directory. Saved specs live under `<directory>/.opencode/workflows/`. */
+  /**
+   * The directory of this instance.
+   *
+   * Saved specs live under `<directory>/.opencode/workflows/`, and a run started here is
+   * anchored to it, so it never writes into the worktree of another instance.
+   */
   directory: string
   spawner: Spawner
   runner: Runner
@@ -91,7 +96,11 @@ const fail = (error: string): Result => ({ content: `error: ${error}`, output: {
  * fiber defect instead of a tool error, so these functions must always resolve.
  */
 export function workflowTools(deps: ToolDeps): WorkflowTool[] {
-  const limits = { maxAgents: deps.config.maxAgents, shellTasks: deps.config.shellTasks }
+  const limits = {
+    maxAgents: deps.config.maxAgents,
+    shellTasks: deps.config.shellTasks,
+    worktrees: deps.config.worktrees,
+  }
 
   /**
    * A member session is a task of a run. It may not drive the engine that started it.
@@ -113,6 +122,7 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
     const runId = await deps.runner.start(parsed.spec, {
       lead: context.sessionID,
       leadAgent: context.agent,
+      directory: deps.directory,
       overrides,
     })
     const spec = { ...parsed.spec }
@@ -445,7 +455,11 @@ async function diagnose(deps: ToolDeps): Promise<Doctor> {
       invalidSpecs.push({ name, error: loaded.error })
       continue
     }
-    const parsed = parseSpec(loaded.value, { maxAgents: deps.config.maxAgents, shellTasks: deps.config.shellTasks })
+    const parsed = parseSpec(loaded.value, {
+      maxAgents: deps.config.maxAgents,
+      shellTasks: deps.config.shellTasks,
+      worktrees: deps.config.worktrees,
+    })
     if (!parsed.ok) invalidSpecs.push({ name, error: parsed.errors[0] ?? "invalid" })
   }
 

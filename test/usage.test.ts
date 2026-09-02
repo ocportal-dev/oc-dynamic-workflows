@@ -9,7 +9,7 @@ const RETRIED: WorkflowSpec = {
   specVersion: 1,
   name: "retry",
   goal: "try again",
-  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 1 }] }],
+  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 1, keep: false }] }],
 }
 
 /** Two team phases, so each one opens the mailbox with its own baseline. */
@@ -21,7 +21,7 @@ const TWO_PHASES: WorkflowSpec = {
     id,
     strategy: "team" as const,
     mailbox: { peers: false as const, maxMessages: 20 },
-    tasks: [{ id: `t${id}`, kind: "agent" as const, prompt: `do ${id}`, retries: 0 }],
+    tasks: [{ id: `t${id}`, kind: "agent" as const, prompt: `do ${id}`, retries: 0, keep: false }],
   })),
 }
 

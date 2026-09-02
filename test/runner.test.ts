@@ -15,7 +15,7 @@ const START = { lead: LEAD, leadAgent: LEAD_AGENT }
 
 it("forges the spawn context and learns the child from session.created", async () => {
   const fake = startRunner()
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
 
   expect(spawn.context.sessionID).toBe(LEAD)
@@ -38,8 +38,8 @@ it("runs a sequential phase in order and passes the earlier output on", async ()
   const fake = startRunner()
   const runId = await fake.runner.start(
     sequential([
-      { id: "a", kind: "agent", prompt: "first", retries: 0 },
-      { id: "b", kind: "agent", prompt: "second", retries: 0 },
+      { id: "a", kind: "agent", prompt: "first", retries: 0, keep: false },
+      { id: "b", kind: "agent", prompt: "second", retries: 0, keep: false },
     ]),
     START,
   )
@@ -66,7 +66,7 @@ it("runs a sequential phase in order and passes the earlier output on", async ()
 it("interrupts a task that runs out of time and does not send it again", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, timeoutMs: 30 }]),
+    sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false, timeoutMs: 30 }]),
     START,
   )
   const spawn = await waitForSpawn(fake, 1)
@@ -84,7 +84,7 @@ it("interrupts a task that runs out of time and does not send it again", async (
 it("starts a new child for a retry", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "flaky", retries: 1 }]),
+    sequential([{ id: "a", kind: "agent", prompt: "flaky", retries: 1, keep: false }]),
     START,
   )
 
@@ -107,8 +107,8 @@ it("cancels a run: the child is interrupted and the run is marked cancelled", as
   const fake = startRunner()
   const runId = await fake.runner.start(
     sequential([
-      { id: "a", kind: "agent", prompt: "long", retries: 2 },
-      { id: "b", kind: "agent", prompt: "later", retries: 0 },
+      { id: "a", kind: "agent", prompt: "long", retries: 2, keep: false },
+      { id: "b", kind: "agent", prompt: "later", retries: 0, keep: false },
     ]),
     START,
   )
@@ -130,7 +130,7 @@ it("cancels a run: the child is interrupted and the run is marked cancelled", as
 
 it("cancels through a task id", async () => {
   const fake = startRunner()
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "long", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "long", retries: 0, keep: false }]), START)
   await waitForSpawn(fake, 1)
   expect(await fake.runner.cancel({ taskId: "a" })).toEqual({ ok: true, runId })
   await fake.runner.wait(runId)
@@ -150,7 +150,7 @@ it("reports a cancel that names nothing the runner knows", async () => {
 
 it("sends the final report to the lead as a steer", async () => {
   const fake = startRunner()
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
   spawn.settle("the answer")
   await fake.runner.wait(runId)
@@ -174,7 +174,7 @@ it("writes the run record on every transition under the project prefix", async (
     await set(key, value)
   }
 
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
   spawn.settle("done")
   await fake.runner.wait(runId)
@@ -190,8 +190,8 @@ it("runs a shell task and keeps its output and exit code", async () => {
   const fake = startRunner({ directory: process.cwd() })
   const runId = await fake.runner.start(
     sequential([
-      { id: "a", kind: "shell", command: "echo hello-shell", retries: 0 },
-      { id: "b", kind: "shell", command: "exit 3", retries: 0 },
+      { id: "a", kind: "shell", command: "echo hello-shell", retries: 0, keep: false },
+      { id: "b", kind: "shell", command: "exit 3", retries: 0, keep: false },
     ]),
     START,
   )
@@ -210,7 +210,7 @@ it("runs a shell task and keeps its output and exit code", async () => {
 
 it("marks a run left running by a restart as orphaned", async () => {
   const fake = startRunner()
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "first", retries: 0, keep: false }]), START)
   await waitForSpawn(fake, 1)
   await tick(2)
 

@@ -14,8 +14,8 @@ const PAIR: WorkflowSpec = {
       id: "p",
       strategy: "parallel",
       tasks: [
-        { id: "a", kind: "agent", prompt: "slow", retries: 0, timeoutMs: 20 },
-        { id: "b", kind: "agent", prompt: "quick", retries: 0 },
+        { id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false, timeoutMs: 20 },
+        { id: "b", kind: "agent", prompt: "quick", retries: 0, keep: false },
       ],
     },
   ],
@@ -25,7 +25,7 @@ const ONE: WorkflowSpec = {
   specVersion: 1,
   name: "one",
   goal: "do one thing",
-  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0 }] }],
+  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0, keep: false }] }],
 }
 
 it("marks a task that timed out before its child was named and goes on", async () => {

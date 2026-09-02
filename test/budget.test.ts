@@ -15,7 +15,7 @@ function four(budget?: BudgetSpec): WorkflowSpec {
       {
         id: "p",
         strategy: "parallel",
-        tasks: ["a", "b", "c", "d"].map((id) => ({ id, kind: "agent" as const, prompt: id, retries: 0 })),
+        tasks: ["a", "b", "c", "d"].map((id) => ({ id, kind: "agent" as const, prompt: id, retries: 0, keep: false })),
       },
     ],
   }
@@ -90,8 +90,8 @@ it("reads the cap again after a lead wake was charged to the run", async () => {
         id: "p",
         strategy: "team",
         tasks: [
-          { id: "a", kind: "agent", prompt: "ask", retries: 0 },
-          { id: "b", kind: "agent", prompt: "later", retries: 0 },
+          { id: "a", kind: "agent", prompt: "ask", retries: 0, keep: false },
+          { id: "b", kind: "agent", prompt: "later", retries: 0, keep: false },
         ],
       },
     ],

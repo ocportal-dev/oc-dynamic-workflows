@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode-ai/plugin"
 import { workflowCommands } from "./commands.js"
 import { resolveConfig } from "./config.js"
+import { attach, detach } from "./engine.js"
 import { consumeEvents } from "./events.js"
 import { contextHook } from "./hooks.js"
 import { PREFIX } from "./log.js"
@@ -19,31 +20,39 @@ export default Plugin.define({
     for (const warning of warnings) console.warn(`${PREFIX} ${warning}`)
 
     const prefix = storagePrefix(ctx.location.project?.id, ctx.location.directory)
-    const runs = new RunStore(ctx.storage, prefix, ctx.location.directory)
-    const roster = new Roster(async (sessionID) => ctx.session.get({ sessionID }))
-    const spawner = new Spawner({ interrupt: (sessionID) => ctx.session.interrupt({ sessionID, continue: false }) })
-    const mailbox = new Mailbox({
-      session: ctx.session,
-      store: runs,
-      roster,
-      config,
-      // The runner owns the spawn promise that the forced interrupt rejects.
-      onForcedSteer: (runId, taskId) => runner.noteForcedSteer(runId, taskId),
-      // A wake is billed to the run, so the cap is read again right after it.
-      onSpend: async (runId: string): Promise<void> => {
-        await runner.checkBudget(runId)
-      },
+    // A worktree instance serves the sessions of its own directory, so it has to drive the
+    // engine the run started on instead of building a second one.
+    const attached = attach(prefix, () => {
+      const runs = new RunStore(ctx.storage, prefix, ctx.location.directory)
+      const roster = new Roster(async (sessionID) => ctx.session.get({ sessionID }))
+      const spawner = new Spawner({ interrupt: (sessionID) => ctx.session.interrupt({ sessionID, continue: false }) })
+      const live = new Set<string>()
+      const mailbox = new Mailbox({
+        session: ctx.session,
+        store: runs,
+        roster,
+        config,
+        // The runner owns the spawn promise that the forced interrupt rejects.
+        onForcedSteer: (runId, taskId) => runner.noteForcedSteer(runId, taskId),
+        // A wake is billed to the run, so the cap is read again right after it.
+        onSpend: async (runId: string): Promise<void> => {
+          await runner.checkBudget(runId)
+        },
+      })
+      const runner = new Runner({
+        session: ctx.session,
+        store: runs,
+        roster,
+        spawner,
+        config,
+        mailbox,
+        activeRuns: live,
+        directory: ctx.location.directory,
+        generate: (input) => ctx.generate.text(input),
+      })
+      return { runs, roster, spawner, mailbox, runner, live }
     })
-    const runner = new Runner({
-      session: ctx.session,
-      store: runs,
-      roster,
-      spawner,
-      config,
-      mailbox,
-      directory: ctx.location.directory,
-      generate: (input) => ctx.generate.text(input),
-    })
+    const { runs, roster, spawner, mailbox, runner } = attached.engine
     const tools = workflowTools({
       config,
       warnings,
@@ -86,15 +95,16 @@ export default Plugin.define({
       roster,
       store: runs,
       mailbox,
+      runner,
       signal: aborter.signal,
     })
-    await runner.recoverOrphans()
+    // Only the instance that built the engine walks the runs a restart left behind.
+    if (attached.first) await runner.recoverOrphans()
 
     return async () => {
       aborter.abort()
-      mailbox.dispose()
-      // The runs of this instance have no watcher after the reload, so they are stopped.
-      await runner.dispose()
+      // The last instance to go stops the runs, because nothing would watch them after it.
+      await detach(prefix)
       await events.catch(() => {})
       await Promise.all(registrations.map((registration) => registration.dispose()))
     }

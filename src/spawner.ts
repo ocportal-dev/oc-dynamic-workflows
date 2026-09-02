@@ -20,6 +20,14 @@ export interface SpawnRequest {
   /** Unique per attempt. Becomes the child session title. */
   description: string
   prompt: string
+  /**
+   * An existing direct child of the lead.
+   *
+   * The executor prompts that session instead of creating one, and blocks until its turn
+   * ends, exactly as it does for a fresh child. It is how a member that was moved into its
+   * worktree is given its real task.
+   */
+  sessionID?: string
 }
 
 export interface SpawnOutput {
@@ -85,6 +93,8 @@ export class Spawner {
       description: request.description,
       prompt: request.prompt,
       background: false,
+      // Left out when there is none, because the executor branches on the key.
+      ...(request.sessionID ? { sessionID: request.sessionID } : {}),
     }
     const promise = execute(input, context).then(readOutput)
     return { promise, cancel }

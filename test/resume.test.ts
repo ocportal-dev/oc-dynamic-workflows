@@ -16,7 +16,7 @@ const CHAIN: WorkflowSpec = {
     {
       id: "p",
       strategy: "sequential",
-      tasks: ["a", "b", "c"].map((id) => ({ id, kind: "agent" as const, prompt: id, retries: 0 })),
+      tasks: ["a", "b", "c"].map((id) => ({ id, kind: "agent" as const, prompt: id, retries: 0, keep: false })),
     },
   ],
 }
@@ -140,8 +140,8 @@ it("keeps a phase that completed whole and does not synthesise it again", async 
     name: "two",
     goal: "one phase then the next",
     phases: [
-      { id: "one", strategy: "sequential", synthesisPrompt: "sum it up", tasks: [{ id: "a", kind: "agent", prompt: "a", retries: 0 }] },
-      { id: "two", strategy: "sequential", tasks: [{ id: "b", kind: "agent", prompt: "b", retries: 0 }] },
+      { id: "one", strategy: "sequential", synthesisPrompt: "sum it up", tasks: [{ id: "a", kind: "agent", prompt: "a", retries: 0, keep: false }] },
+      { id: "two", strategy: "sequential", tasks: [{ id: "b", kind: "agent", prompt: "b", retries: 0, keep: false }] },
     ],
   }
   const runId = await fake.runner.start(spec, START)

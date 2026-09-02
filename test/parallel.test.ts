@@ -19,6 +19,7 @@ function parallel(count: number, synthesisPrompt?: string): WorkflowSpec {
           kind: "agent" as const,
           prompt: `say word ${index + 1}`,
           retries: 0,
+          keep: false,
         })),
       },
     ],
@@ -84,7 +85,7 @@ it("goes on to the next phase after a partial parallel phase", async () => {
   spec.phases.push({
     id: "write",
     strategy: "sequential",
-    tasks: [{ id: "report", kind: "agent", prompt: "write the report", retries: 0 }],
+    tasks: [{ id: "report", kind: "agent", prompt: "write the report", retries: 0, keep: false }],
   })
 
   const runId = await fake.runner.start(spec, START)
@@ -111,11 +112,11 @@ it("stops the run when a sequential phase loses a task", async () => {
         id: "first",
         strategy: "sequential",
         tasks: [
-          { id: "a", kind: "agent", prompt: "one", retries: 0 },
-          { id: "b", kind: "agent", prompt: "two", retries: 0 },
+          { id: "a", kind: "agent", prompt: "one", retries: 0, keep: false },
+          { id: "b", kind: "agent", prompt: "two", retries: 0, keep: false },
         ],
       },
-      { id: "second", strategy: "sequential", tasks: [{ id: "c", kind: "agent", prompt: "three", retries: 0 }] },
+      { id: "second", strategy: "sequential", tasks: [{ id: "c", kind: "agent", prompt: "three", retries: 0, keep: false }] },
     ],
   }
 
@@ -153,7 +154,7 @@ it("synthesises a phase and passes the summary, not the outputs, to the next pha
   spec.phases.push({
     id: "write",
     strategy: "sequential",
-    tasks: [{ id: "report", kind: "agent", prompt: "write the report", retries: 0 }],
+    tasks: [{ id: "report", kind: "agent", prompt: "write the report", retries: 0, keep: false }],
   })
 
   const runId = await fake.runner.start(spec, START)

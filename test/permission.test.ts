@@ -15,7 +15,7 @@ function onePhase(strategy: WorkflowSpec["phases"][number]["strategy"], retries 
         id: "p",
         strategy,
         mailbox: strategy === "team" ? { peers: false, maxMessages: 20 } : undefined,
-        tasks: [{ id: "probe", kind: "agent", prompt: "look", retries }],
+        tasks: [{ id: "probe", kind: "agent", prompt: "look", retries, keep: false }],
       },
     ],
   }

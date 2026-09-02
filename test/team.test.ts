@@ -16,7 +16,7 @@ function team(tasks: string[], maxMessages = 20): WorkflowSpec {
         id: "work",
         strategy: "team",
         mailbox: { peers: false, maxMessages },
-        tasks: tasks.map((id) => ({ id, kind: "agent" as const, prompt: `do ${id}`, retries: 0 })),
+        tasks: tasks.map((id) => ({ id, kind: "agent" as const, prompt: `do ${id}`, retries: 0, keep: false })),
       },
     ],
   }

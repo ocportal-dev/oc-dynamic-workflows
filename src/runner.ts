@@ -10,12 +10,15 @@ import { describeTask, Roster } from "./roster.js"
 import { type ShellHandle, startShell } from "./shell.js"
 import { parseSpec } from "./spec.js"
 import type { Spawner } from "./spawner.js"
+import * as worktree from "./worktree.js"
 import type { PhaseRecord, PhaseSpec, RunRecord, TaskRecord, TaskSpec, WorkflowSpec } from "./types.js"
 
 /** `ctx.session`, reduced to the calls the runner makes. */
 export interface RunnerSession {
   get: (input: { sessionID: string }) => Promise<{ cost?: number; tokens?: unknown; outcome?: unknown } | undefined>
   interrupt: (input: { sessionID: string; continue: boolean }) => Promise<unknown>
+  /** Moves a session to another directory. The move lands at its next step boundary. */
+  move: (input: { sessionID: string; directory: string }) => Promise<unknown>
   synthetic: (input: {
     sessionID: string
     text: string
@@ -33,8 +36,10 @@ export interface RunnerDeps {
   config: WorkflowConfig
   /** The hub mailbox. Without it a `team` phase runs like a `parallel` one. */
   mailbox?: Mailbox
-  /** The project directory. Shell tasks run there. */
+  /** The fallback home, used by a run whose record names no directory of its own. */
   directory: string
+  /** The run ids this process has a loop for. Shared by every instance of the engine. */
+  activeRuns?: Set<string>
   /** `ctx.generate.text`. Without it a phase cannot be synthesised. */
   generate?: (input: { prompt: string }) => Promise<{ text: string }>
   /** The clock the run limit reads. A test can move it. */
@@ -43,11 +48,15 @@ export interface RunnerDeps {
   pollIntervalMs?: number
   /** How often the roster is asked for a child that timed out before it was named. */
   childPollMs?: number
+  /** How long the move of an idle worktree member gets. */
+  moveTimeoutMs?: number
 }
 
 export interface StartOptions {
   lead: string
   leadAgent: string
+  /** The directory of the calling session. Becomes the home of the run. */
+  directory?: string
   overrides?: { maxCostUsd?: number; maxTokens?: number; concurrency?: number }
   /** Resume only: task id → what the lead wants that task to do differently. */
   guidance?: Record<string, string>
@@ -72,6 +81,12 @@ const FORCE_GRACE_MS = 30_000
 /** How long a timed-out task waits for the roster to name its child, and how often. */
 const CHILD_WAIT_POLLS = 20
 const CHILD_POLL_MS = 500
+/** The cheap turn that leaves a worktree member idle, so `#warmUpAndMove` can move it. */
+const WARMUP_PROMPT = "Reply with the single word ready and call no tools."
+/** How long that turn gets. Independent of the task clock, but counted against it. */
+const WARMUP_TIMEOUT_MS = 60_000
+/** How long the move of an idle member gets: the boot of the destination instance. */
+const MOVE_TIMEOUT_MS = 60_000
 /** How long a cancel waits for the run loop to settle before it answers anyway. */
 const CANCEL_WAIT_MS = 15_000
 /** One guidance text of a resume. It lands in a member prompt, so it is capped like mail. */
@@ -107,16 +122,19 @@ export class Runner {
   /** `runId:taskId` of a member the lead force-steered. Its spawn promise is doomed. */
   #forced = new Set<string>()
   #loops = new Map<string, Promise<void>>()
-  /** The runs this instance is driving right now. A second loop over one run is refused. */
-  #active = new Set<string>()
+  /** The runs this process is driving right now. A second loop over one run is refused. */
+  #active: Set<string>
   /** run id → task id → the task in flight, so `cancel` can end it. */
   #live = new Map<string, Map<string, Live>>()
   #disposed = false
   /** Aborted by `dispose`, so every sleep this runner is parked in returns at once. */
   #aborter = new AbortController()
+  /** member session id → the waiter of the move into its worktree. */
+  #moves = new Map<string, () => void>()
 
   constructor(deps: RunnerDeps) {
     this.#deps = deps
+    this.#active = deps.activeRuns ?? new Set<string>()
   }
 
   /** Writes the run record, starts the loop, and returns without waiting for it. */
@@ -183,12 +201,15 @@ export class Runner {
     const checked = parseSpec(run.spec, {
       maxAgents: this.#deps.config.maxAgents,
       shellTasks: this.#deps.config.shellTasks,
+      worktrees: this.#deps.config.worktrees,
     })
     if (!checked.ok) {
       return { ok: false, error: `the spec of run ${runId} is no longer valid: ${checked.errors.join("; ")}` }
     }
 
     run.concurrency = clamp(options.overrides?.concurrency ?? run.concurrency ?? this.#deps.config.concurrency, 1, 16)
+    // The caller becomes the lead, but the home of the run does not move with it: the
+    // patches and the mirror of the earlier phases are already there.
     run.leadSessionID = options.lead
     run.leadAgent = options.leadAgent
     run.resumes = (run.resumes ?? 0) + 1
@@ -232,6 +253,19 @@ export class Runner {
    */
   noteForcedSteer(runId: string, taskId: string): void {
     this.#forced.add(`${runId}:${taskId}`)
+  }
+
+  /**
+   * `session.moved` says a member arrived in its worktree.
+   *
+   * Both the old and the new location publish it, so a second call finds no waiter and
+   * does nothing.
+   */
+  observeMoved(sessionID: string): void {
+    const waiter = this.#moves.get(sessionID)
+    if (!waiter) return
+    this.#moves.delete(sessionID)
+    waiter()
   }
 
   /** Resolves when the run loop has finished. Nothing on the tool path waits for it. */
@@ -297,7 +331,31 @@ export class Runner {
       for (const task of resurrected) {
         if (task.sessionID) await this.#interruptResurrected(task.sessionID)
       }
+      // The member's edits are the only thing the restart would otherwise lose.
+      await this.#settleWorktrees(run)
       await this.#deps.store.put(run)
+    }
+  }
+
+  /**
+   * Saves the edits of every worktree of a run that is still on disk, and takes it down.
+   *
+   * A task records its worktree when it is created, so a run the loop no longer watches
+   * still names them. A worktree the task already settled is gone, and is skipped.
+   */
+  async #settleWorktrees(run: RunRecord): Promise<void> {
+    for (const phase of run.phases) {
+      for (const task of phase.tasks) {
+        const found = task.worktree
+        if (!found || !(await worktree.exists(found.path).catch(() => false))) continue
+        task.worktree = await worktree.settle({
+          home: this.#home(run),
+          runId: run.runId,
+          taskId: task.taskId,
+          path: found.path,
+          keep: found.kept,
+        })
+      }
     }
   }
 
@@ -328,6 +386,7 @@ export class Runner {
       const run = await this.#deps.store.get(runId).catch(() => undefined)
       // The handles have to be read before they are dropped, or nothing is interrupted.
       if (run) await this.#stopLive(run).catch(swallow("a member interrupt on dispose"))
+      if (run) await this.#settleWorktrees(run).catch(swallow("a worktree settle on dispose"))
       this.#live.delete(runId)
       if (!run || run.status !== "running") continue
       markOrphaned(run, "plugin reloaded during the run")
@@ -360,6 +419,18 @@ export class Runner {
 
   #now(): number {
     return (this.#deps.now ?? Date.now)()
+  }
+
+  /**
+   * Where this run writes.
+   *
+   * The engine is shared by every instance of the project, and the first one to attach may
+   * be a worktree, so the instance that built it is not the anchor. The session that
+   * started the run is, and its directory is on the record. A record from before the field
+   * existed falls back to the directory of this instance.
+   */
+  #home(run: RunRecord): string {
+    return run.directory ?? this.#deps.directory
   }
 
   /** A bare task id is looked up in the runs the caller leads, not in every run. */
@@ -610,15 +681,43 @@ export class Runner {
       task.asked = undefined
       task.rejected = undefined
       task.startedAt ??= new Date().toISOString()
+      task.worktree = undefined
       await this.#deps.store.put(run)
+
+      // The worktree is recorded before the task starts, so a restart still finds it.
+      let isolated: string | undefined
+      if (spec.isolation === "worktree") {
+        const home = this.#home(run)
+        const created = await worktree.create({ home, runId: run.runId, taskId: task.taskId })
+        if (!created.ok) {
+          task.status = "failed"
+          task.error = `worktree: ${created.error}`
+          task.endedAt = new Date().toISOString()
+          await this.#deps.store.put(run)
+          continue
+        }
+        isolated = created.path
+        task.worktree = { path: created.path, kept: spec.keep, stat: "" }
+        await this.#deps.store.put(run)
+      }
 
       const outcome =
         spec.kind === "shell"
-          ? await this.#shellTask(run, spec, task)
-          : await this.#agentTask(run, phase, spec, task, attempt, messageID)
+          ? await this.#shellTask(run, spec, task, isolated)
+          : await this.#agentTask(run, phase, spec, task, attempt, messageID, isolated)
 
       task.status = this.#halted(run.runId) && outcome !== "completed" ? "cancelled" : outcome
       task.endedAt = new Date().toISOString()
+      // However the attempt ended, what the member changed is saved before the worktree goes.
+      if (isolated) {
+        task.worktree = await worktree.settle({
+          home: this.#home(run),
+          runId: run.runId,
+          taskId: task.taskId,
+          path: isolated,
+          keep: spec.keep,
+        })
+      }
       // The user refused the member's permission ask, so say so and do not send it again:
       // a new attempt would ask the same question. The cast is needed because the reset
       // above narrows the property to `undefined`, while the event consumer writes it.
@@ -663,14 +762,24 @@ export class Runner {
    * after the option was turned off. The command is registered as live, so a cancel, the
    * budget, and the run clock reach it the same way they reach a member session.
    */
-  async #shellTask(run: RunRecord, spec: TaskSpec, task: TaskRecord): Promise<TaskRecord["status"]> {
+  async #shellTask(
+    run: RunRecord,
+    spec: TaskSpec,
+    task: TaskRecord,
+    isolated: string | undefined,
+  ): Promise<TaskRecord["status"]> {
     if (!this.#deps.config.shellTasks) {
       task.error = "shell tasks are disabled by the shellTasks option"
       return "failed"
     }
     let handle: ShellHandle
     try {
-      handle = startShell({ command: spec.command ?? "", cwd: this.#deps.directory, timeoutMs: spec.timeoutMs })
+      // An isolated shell task runs in its worktree; there is no session to move.
+      handle = startShell({
+        command: spec.command ?? "",
+        cwd: isolated ?? this.#home(run),
+        timeoutMs: spec.timeoutMs,
+      })
     } catch (error) {
       // A command that cannot even start fails its task, not the whole run loop.
       task.error = describe(error)
@@ -699,30 +808,49 @@ export class Runner {
     task: TaskRecord,
     attempt: number,
     messageID: string | undefined,
+    isolated: string | undefined,
   ): Promise<TaskRecord["status"]> {
     const timeoutMs = spec.timeoutMs ?? this.#deps.config.defaultTaskTimeoutMs
     const startedAt = this.#now()
     const description = describeTask(run.runId, task.taskId, attempt)
-    const expected = this.#deps.roster.expect(description)
+    const live: Live = { kind: "agent", cancel: async () => {}, sessionID: undefined }
+    this.#live.get(run.runId)?.set(task.taskId, live)
+
+    // A child inherits the directory of the lead, so an isolated member is warmed up,
+    // moved while it is idle, and only then given its real task in the same session.
+    let moved: string | undefined
+    if (isolated) {
+      const prepared = await this.#warmUpAndMove(run, spec, task, description, messageID, isolated, live)
+      if (!prepared.ok) {
+        this.#deps.roster.forget(description)
+        this.#live.get(run.runId)?.delete(task.taskId)
+        await this.#readUsage(run, task)
+        return "failed"
+      }
+      moved = prepared.sessionID
+    }
+
+    const expected = moved ? undefined : this.#deps.roster.expect(description)
     const handle = this.#deps.spawner.spawn({
       lead: run.leadSessionID,
       leadAgent: run.leadAgent,
       messageID,
       agent: spec.agent ?? this.#deps.config.defaultAgent,
       description,
-      prompt: buildPrompt(run, phase, spec, task.guidance),
+      prompt: buildPrompt(run, phase, spec, task.guidance, isolated),
+      sessionID: moved,
     })
-
-    const live: Live = { kind: "agent", cancel: handle.cancel, sessionID: undefined }
-    this.#live.get(run.runId)?.set(task.taskId, live)
+    live.cancel = handle.cancel
+    // A continued session was announced by its first spawn, so only a fresh one is awaited.
     expected
-      .then((sessionID) => {
+      ?.then((sessionID) => {
         live.sessionID = sessionID
         task.sessionID = sessionID
       })
       .catch(swallow("a child session lookup"))
 
-    const settled = await race(handle.promise, timeoutMs)
+    // The warm-up and the move come out of the task's own clock.
+    const settled = await race(handle.promise, Math.max(timeoutMs - (this.#now() - startedAt), 0))
     let status: TaskRecord["status"]
     if (settled.type === "timeout") {
       const sessionID = live.sessionID ?? task.sessionID ?? (await this.#waitForChild(live, task))
@@ -774,6 +902,118 @@ export class Runner {
   }
 
   /**
+   * Gives a worktree member a cheap turn, then moves it while it is idle.
+   *
+   * A move is applied at the session's next step boundary. A member that is spawned with
+   * its real task starts that task in the directory it was created in, and the boot of the
+   * destination location instance takes longer than the step does, so the work would
+   * happen in the wrong checkout. The member is therefore spawned with a warm-up prompt
+   * first. The executor comes back when that turn ends, which leaves the session idle, and
+   * an idle session applies a move with no model request.
+   *
+   * Nothing is interrupted here. A warm-up or a move that does not come back fails the
+   * attempt, and a retry gets a new session and a fresh worktree.
+   */
+  async #warmUpAndMove(
+    run: RunRecord,
+    spec: TaskSpec,
+    task: TaskRecord,
+    description: string,
+    messageID: string | undefined,
+    directory: string,
+    live: Extract<Live, { kind: "agent" }>,
+  ): Promise<{ ok: true; sessionID: string } | { ok: false }> {
+    const expected = this.#deps.roster.expect(description)
+    const warm = this.#deps.spawner.spawn({
+      lead: run.leadSessionID,
+      leadAgent: run.leadAgent,
+      messageID,
+      agent: spec.agent ?? this.#deps.config.defaultAgent,
+      description,
+      prompt: WARMUP_PROMPT,
+    })
+    live.cancel = warm.cancel
+    expected
+      .then((sessionID) => {
+        live.sessionID = sessionID
+        task.sessionID = sessionID
+      })
+      .catch(swallow("a child session lookup"))
+
+    const settled = await race(warm.promise, WARMUP_TIMEOUT_MS)
+    if (settled.type !== "value") {
+      const sessionID = live.sessionID ?? task.sessionID
+      if (sessionID) {
+        // A warm-up that hangs still owns a child, so it is ended before the attempt fails.
+        await warm.cancel(sessionID).catch(swallow("a member interrupt"))
+        await warm.promise.catch(() => {})
+      } else {
+        warm.promise.catch(swallow("an abandoned child"))
+      }
+      task.error = "worktree: the member did not answer the warm-up"
+      return { ok: false }
+    }
+
+    const sessionID = settled.value.sessionID
+    live.sessionID = sessionID
+    task.sessionID = sessionID
+    this.#deps.roster.bind(run.runId, task.taskId, sessionID)
+    // The child is known, so the second spawn does not wait for a `session.created`.
+    this.#deps.roster.forget(description)
+
+    const watch = this.#watchMoved(sessionID)
+    const asked = await this.#deps.session.move({ sessionID, directory }).then(
+      () => true,
+      () => false,
+    )
+    if (asked && (await watch.wait(this.#deps.moveTimeoutMs ?? MOVE_TIMEOUT_MS, run.runId))) {
+      return { ok: true, sessionID }
+    }
+    this.#moves.delete(sessionID)
+    task.error = `worktree: the member did not arrive in ${directory}`
+    return { ok: false }
+  }
+
+  /**
+   * Watches for the `session.moved` of one member.
+   *
+   * The waiter is live from this call on, and `wait` starts the clock, because the move
+   * has to be asked for between the two and `session.moved` can arrive before that call
+   * comes back. A cancel, a budget stop, or a reload ends the wait as well, so a run is
+   * never parked here.
+   */
+  #watchMoved(sessionID: string): { wait: (ms: number, runId: string) => Promise<boolean> } {
+    let arrived = false
+    let answer: ((value: boolean) => void) | undefined
+    this.#moves.set(sessionID, () => {
+      arrived = true
+      answer?.(true)
+    })
+    return {
+      wait: (ms: number, runId: string): Promise<boolean> => {
+        if (arrived) return Promise.resolve(true)
+        return new Promise<boolean>((resolve) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          let watchdog: ReturnType<typeof setInterval> | undefined
+          const done = (value: boolean): void => {
+            clearTimeout(timer)
+            clearInterval(watchdog)
+            this.#moves.delete(sessionID)
+            resolve(value)
+          }
+          timer = setTimeout(() => done(false), ms)
+          timer.unref?.()
+          watchdog = setInterval(() => {
+            if (this.#halted(runId) || this.#disposed) done(false)
+          }, this.#deps.pollIntervalMs ?? POLL_MS)
+          watchdog.unref?.()
+          answer = done
+        })
+      },
+    }
+  }
+
+  /**
    * Gives the roster a moment to name a child that timed out before it was announced.
    *
    * `session.created` may still be on its way, and without the child id nothing can be
@@ -813,8 +1053,15 @@ export class Runner {
         continue
       }
       if (outcome) {
-        task.output = clip(await this.#lastAssistantText(sessionID), OUTPUT_LIMIT)
-        if (outcome === "succeeded") return "completed"
+        const answer = await this.#lastAssistantText(sessionID)
+        task.output = clip(answer, OUTPUT_LIMIT)
+        if (outcome === "succeeded") {
+          // A member interrupted before its first answer ends succeeded with nothing to
+          // say, and an empty output must not travel on as a result.
+          if (answer.trim()) return "completed"
+          task.error = "the member ended without an answer"
+          return "failed"
+        }
         task.error = `the member session ended: ${outcome}`
         return outcome === "interrupted" ? "cancelled" : "failed"
       }
@@ -929,8 +1176,15 @@ async function race<T>(promise: Promise<T>, timeoutMs: number | undefined): Prom
  * the goal, the synthesis of the earlier phases, and, in a sequential phase, what the
  * earlier tasks of the phase produced. Every borrowed text is marked as untrusted.
  */
-export function buildPrompt(run: RunRecord, phase: PhaseRecord, task: TaskSpec, guidance?: string): string {
+export function buildPrompt(
+  run: RunRecord,
+  phase: PhaseRecord,
+  task: TaskSpec,
+  guidance?: string,
+  worktreePath?: string,
+): string {
   const parts = specHeader(run)
+  if (worktreePath) parts.push(`Your working directory is ${worktreePath}, a git worktree. Work only there.`)
 
   const summaries = run.phases
     .slice(0, run.phases.indexOf(phase))
@@ -1008,6 +1262,8 @@ function resetForResume(run: RunRecord): void {
       task.sessionID = undefined
       task.startedAt = undefined
       task.endedAt = undefined
+      // The task runs again, so it gets a new worktree; the completed ones keep theirs.
+      task.worktree = undefined
     }
     const synthesised = run.spec.phases[index]?.synthesisPrompt === undefined || phase.synthesis?.status === "completed"
     const whole = phase.tasks.every((task) => task.status === "completed") && synthesised
@@ -1045,6 +1301,7 @@ function newRun(spec: WorkflowSpec, options: StartOptions, concurrency: number):
     concurrency,
     leadSessionID: options.lead,
     leadAgent: options.leadAgent,
+    directory: options.directory,
     createdAt: now,
     updatedAt: now,
     budget: {

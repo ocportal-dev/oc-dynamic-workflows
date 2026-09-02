@@ -35,11 +35,11 @@ publish date. Install with `npm install --min-release-age=0`.
 
 ## Architecture
 
-- **`src/index.ts`** — Plugin entry point. Builds the store, the roster, the spawner, and
-  the runner, registers the tools through `ctx.tool.transform`, the commands through
-  `ctx.command.transform`, and the skill through `ctx.skill.transform`, captures the built-in
-  `subagent` executor, starts the event consumer, recovers orphaned runs, and returns the
-  cleanup function.
+- **`src/index.ts`** — Plugin entry point. Attaches to the shared engine, building the store,
+  the roster, the spawner, and the runner on the first instance. Registers the tools through
+  `ctx.tool.transform`, the commands through `ctx.command.transform`, and the skill through
+  `ctx.skill.transform`, captures the built-in `subagent` executor, starts the event consumer,
+  recovers orphaned runs on the first attach, and returns the cleanup function.
 - **`src/skill.ts`** — `workflowSkill(config)`: the `workflow` skill the plugin registers. Its
   body is built from the resolved options, and its grammar section is `DSL` from `src/spec.ts`.
 - **`src/commands.ts`** — The `/workflow`, `/workflow-status`, `/workflow-resume`, and
@@ -55,6 +55,8 @@ publish date. Install with `npm install --min-release-age=0`.
   `TaskRecord`, and `MailEvent`.
 - **`src/spec.ts`** — The Zod schema for `specVersion: 1`, the alias normalization, and the
   v1 rejections. `parseSpec` returns either the spec or a list of one-line messages.
+- **`src/engine.ts`** — `attach(prefix, build)` / `detach(prefix)`: the module-level, refcounted
+  map of the one engine every plugin instance of a project shares, keyed by the storage prefix.
 - **`src/spec-store.ts`** — Reads and writes `<directory>/.opencode/workflows/<name>.json`.
 - **`src/persistence.ts`** — `RunStore`: run records in `ctx.storage`, keyed by project, plus
   a JSON mirror under `.opencode/workflows/runs/`. Keeps the live record in memory so the
@@ -79,6 +81,8 @@ publish date. Install with `npm install --min-release-age=0`.
 - **`src/output-schema.ts`** — Finds the first JSON object in a task output and checks it
   against a small JSON Schema subset. No dependency.
 - **`src/shell.ts`** — `kind: "shell"` tasks through `Bun.spawn`.
+- **`src/worktree.ts`** — `create`, `settle`, `remove` for an `isolation: "worktree"` task, on
+  top of `git` through `Bun.spawn`. Never throws.
 - **`src/report.ts`** — The spec tree, the progress tree, the final report, and
   `wrapUntrusted`, the envelope every borrowed output is put in.
 - **`src/tools.ts`** — The `workflow_*` and `team_*` tool definitions, including
@@ -127,7 +131,10 @@ live `opencode2` (spike S6).
   be called from plugin code at any later time. This is unsupported internals: it skips the
   input decode, the `tool.execute.*` hooks, and the `Tool.Error` coercion.
   - Input: `{ agent, description, prompt, sessionID?, background? }`. `agent` must be a
-    subagent-mode agent. `description` becomes the child session title.
+    subagent-mode agent. `description` becomes the child session title. With `sessionID` set to
+    an existing direct child of the caller the executor prompts that session instead of creating
+    one, and blocks until its turn ends exactly as it does for a fresh child; no
+    `session.created` is published for that call.
   - The forged context is `{ sessionID, agent, messageID, id, progress }`. `sessionID` must
     be the real lead session and `agent` the lead's real agent, because the executor asks
     for permission with them. `messageID` should be the lead's latest assistant message id
@@ -160,6 +167,15 @@ live `opencode2` (spike S6).
   `inboxID` of the later `session.inbox.delivered` event
   (`data: { inboxID, sessionID }`). `ctx.session.interrupt({ sessionID, continue: true })`
   ends the current step and then resumes the steer-delivery items.
+- `ctx.session.move({ sessionID, directory, delivery? })` resolves the directory, boots the
+  destination location instance, and admits an inbox control item. The move is applied at the
+  session's next step boundary, so an idle session takes it with no model request and a busy one
+  takes it only after the step it is in. Booting that instance starts the global MCP servers
+  again and took about 2.5 seconds live, far longer than a first step, which is why a worktree
+  member is warmed up with one cheap turn, moved while it is idle, and only then prompted with
+  its real task. `session.moved` (`data: { sessionID, location }`) is published to both the old
+  and the new location, and there is one plugin instance per location, all in one process, so
+  both see it.
 - `ctx.location.directory` is the project directory. `ctx.location.project.id` prefixes every
   storage key, because `ctx.storage` is one key-value store for every project. Outside a
   project that id is `"global"`, so the plugin then uses a 12-character SHA-1 of the
@@ -245,7 +261,28 @@ live `opencode2` (spike S6).
 - A restart leaves no run loop behind, so `recoverOrphans` marks such a run `orphaned`,
   marks its `running` tasks `cancelled`, and interrupts every member that has no outcome
   yet, because core resumes a suspended child on its own. The lead is not woken.
-- `task.model` and `task.isolation` are rejected in v1 with a message that names the fix.
+- `task.model` is rejected in v1 with a message that names the fix.
+- D14, one engine per project. `src/engine.ts` holds it, keyed by the storage prefix and
+  refcounted. A worktree is another location, so opencode boots a second plugin instance for
+  it, and that instance serves the member's hooks, tool calls, and events. It has to see the
+  same roster, mailbox, and run records, so every instance attaches to the engine the first
+  one built and registers only its own tools, commands, skill, hook, and event consumer. The
+  first attach runs `recoverOrphans`; the last detach disposes. The engine's home directory
+  is the `ctx.location.directory` of the instance that built it.
+- A run's home is the directory of the session that started it, kept on the record as
+  `run.directory`. The shell cwd, the worktree base, the patches, and the JSON mirror all read
+  it, so a run started from the main checkout never writes into a worktree, whichever instance
+  happened to build the shared engine first. A resume keeps it. A record from before the field
+  falls back to the directory of the instance that reads it.
+- D15, a worktree task saves its edits. When an attempt settles, whatever the outcome,
+  everything is staged, `git diff --cached HEAD` becomes
+  `<home>/.opencode/workflows/runs/<runId>/<taskId>.patch`, and the stat goes on the task. The
+  worktree is then removed unless `keep`. An agent task goes through three steps, because a
+  child inherits the lead's directory and a move only lands at a step boundary: it is spawned
+  with the warm-up prompt, moved while the session is idle, and then prompted with its real
+  task through the same executor with `sessionID` set. Nothing is interrupted on that path; a
+  warm-up or a move that does not come back fails the attempt, and a retry gets a new session
+  and a fresh worktree.
 - A task with an `outputSchema` has to answer with JSON. A miss is a failed attempt, so a
   retry can fix it.
 - Saved workflow names are restricted to `[A-Za-z0-9._-]` and may not contain `..`, so a

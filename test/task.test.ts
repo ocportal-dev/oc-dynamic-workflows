@@ -22,7 +22,7 @@ const WORD_SCHEMA = {
 
 it("uses defaultTaskTimeoutMs when the task names no timeout", async () => {
   const fake = startRunner({ config: { defaultTaskTimeoutMs: 30 } })
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
   await fake.runner.wait(runId)
 
@@ -38,8 +38,8 @@ it("stops the run and ends it partial when it passes maxRunMinutes", async () =>
   const fake = startRunner({ now: () => now, config: { maxRunMinutes: 5 } })
   const runId = await fake.runner.start(
     sequential([
-      { id: "a", kind: "agent", prompt: "first", retries: 0 },
-      { id: "b", kind: "agent", prompt: "second", retries: 0 },
+      { id: "a", kind: "agent", prompt: "first", retries: 0, keep: false },
+      { id: "b", kind: "agent", prompt: "second", retries: 0, keep: false },
     ]),
     START,
   )
@@ -61,7 +61,7 @@ it("stops the run and ends it partial when it passes maxRunMinutes", async () =>
 it("stores the JSON object of a task that has an outputSchema", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, outputSchema: WORD_SCHEMA }]),
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: WORD_SCHEMA }]),
     START,
   )
   ;(await waitForSpawn(fake, 1)).settle('Here you go:\n```json\n{"word": "alpha", "count": 1}\n```\nThat is all.')
@@ -76,7 +76,7 @@ it("stores the JSON object of a task that has an outputSchema", async () => {
 it("burns a retry on an output that does not match the schema", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 1, outputSchema: WORD_SCHEMA }]),
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 1, keep: false, outputSchema: WORD_SCHEMA }]),
     START,
   )
   ;(await waitForSpawn(fake, 1)).settle('{"count": 2}')
@@ -95,7 +95,7 @@ it("burns a retry on an output that does not match the schema", async () => {
 it("fails a task whose output has no JSON object at all", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, outputSchema: WORD_SCHEMA }]),
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: WORD_SCHEMA }]),
     START,
   )
   ;(await waitForSpawn(fake, 1)).settle("alpha")
@@ -111,7 +111,7 @@ it("fails a task whose output has no JSON object at all", async () => {
 it("names the field that does not match the schema", async () => {
   const fake = startRunner()
   const runId = await fake.runner.start(
-    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, outputSchema: WORD_SCHEMA }]),
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: WORD_SCHEMA }]),
     START,
   )
   ;(await waitForSpawn(fake, 1)).settle('{"word": 7, "extra": true}')
@@ -126,7 +126,7 @@ it("names the field that does not match the schema", async () => {
 
 it("waits for a member the lead moved to the background", async () => {
   const fake = startRunner({ pollIntervalMs: 5 })
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
   fake.messages.set(spawn.childID, [
     { id: "msg_1", type: "user", content: [] },
@@ -148,9 +148,29 @@ it("waits for a member the lead moved to the background", async () => {
   await fake.stop()
 })
 
+it("fails a member that ended with nothing to say", async () => {
+  const fake = startRunner({ pollIntervalMs: 5 })
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false }]), START)
+  const spawn = await waitForSpawn(fake, 1)
+  // The transcript holds no assistant text, which is what a member interrupted before its
+  // first answer leaves behind.
+  fake.messages.set(spawn.childID, [{ id: "msg_1", type: "user", content: [] }])
+
+  spawn.background()
+  await tick(2)
+  fake.sessions.get(spawn.childID)!.outcome = "succeeded"
+  await fake.runner.wait(runId)
+
+  const task = (await fake.store.get(runId))!.phases[0]!.tasks[0]!
+  expect(task.status).toBe("failed")
+  expect(task.error).toBe("the member ended without an answer")
+  expect(task.output).toBe("")
+  await fake.stop()
+})
+
 it("fails a backgrounded member that ends without success", async () => {
   const fake = startRunner({ pollIntervalMs: 5 })
-  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0 }]), START)
+  const runId = await fake.runner.start(sequential([{ id: "a", kind: "agent", prompt: "slow", retries: 0, keep: false }]), START)
   const spawn = await waitForSpawn(fake, 1)
   spawn.background()
   await tick(2)

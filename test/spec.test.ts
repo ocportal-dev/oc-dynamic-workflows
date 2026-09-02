@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { parseSpec, type SpecLimits } from "../src/spec.js"
 
-const LIMITS: SpecLimits = { maxAgents: 100, shellTasks: true }
+const LIMITS: SpecLimits = { maxAgents: 100, shellTasks: true, worktrees: true }
 
 const fixture = async (name: string): Promise<unknown> =>
   JSON.parse(await readFile(join(import.meta.dir, "fixtures", `${name}.json`), "utf8"))
@@ -143,19 +143,43 @@ it("rejects a task model with the v1 message", () => {
   ])
 })
 
-it("rejects worktree isolation with the v1 message", () => {
+it("accepts worktree isolation and keep", () => {
+  const workflow = parsed(
+    spec({ phases: [{ id: "one", tasks: [{ id: "a", prompt: "go", isolation: "worktree", keep: true }] }] }),
+  )
+  expect(workflow.phases[0]!.tasks[0]!.isolation).toBe("worktree")
+  expect(workflow.phases[0]!.tasks[0]!.keep).toBe(true)
+})
+
+it("defaults keep to false", () => {
+  const workflow = parsed(spec({ phases: [{ id: "one", tasks: [{ id: "a", prompt: "go", isolation: "worktree" }] }] }))
+  expect(workflow.phases[0]!.tasks[0]!.keep).toBe(false)
+})
+
+it("rejects keep on a task that is not isolated", () => {
+  const messages = errors(spec({ phases: [{ id: "one", tasks: [{ id: "a", prompt: "go", keep: true }] }] }))
+  expect(messages).toEqual(['phases[0].tasks[0].keep: task.keep needs isolation: "worktree"'])
+})
+
+it("names keep among the task keys of an unknown one", () => {
+  const messages = errors(spec({ phases: [{ id: "one", tasks: [{ id: "a", prompt: "go", nonsense: 1 }] }] }))
+  expect(messages.join("\n")).toContain("keep")
+})
+
+it("rejects worktree isolation when the option turns it off", () => {
   const messages = errors(
     spec({ phases: [{ id: "one", tasks: [{ id: "a", prompt: "go", isolation: "worktree" }] }] }),
+    { maxAgents: 100, shellTasks: true, worktrees: false },
   )
   expect(messages).toEqual([
-    'phases[0].tasks[0].isolation: isolation: "worktree" is not supported in v1',
+    'phases[0].tasks[0].isolation: isolation: "worktree" is disabled in the plugin options (worktrees: false)',
   ])
 })
 
 it("rejects a shell task when shell tasks are disabled", () => {
   const messages = errors(
     spec({ phases: [{ id: "one", tasks: [{ id: "a", kind: "shell", command: "ls" }] }] }),
-    { maxAgents: 100, shellTasks: false },
+    { maxAgents: 100, shellTasks: false, worktrees: true },
   )
   expect(messages).toEqual([
     'phases[0].tasks[0].kind: shell tasks are disabled; set the plugin option "shellTasks" to true to allow them',
@@ -175,7 +199,7 @@ it("rejects more tasks than maxAgents allows", () => {
         },
       ],
     }),
-    { maxAgents: 1, shellTasks: true },
+    { maxAgents: 1, shellTasks: true, worktrees: true },
   )
   expect(messages).toEqual(['phases: the workflow has 2 tasks; the limit is 1 (option "maxAgents")'])
 })

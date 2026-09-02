@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { resolveConfig, type WorkflowConfig } from "../src/config.js"
+import { resetEngines } from "../src/engine.js"
 import { consumeEvents } from "../src/events.js"
 import { Mailbox } from "../src/mailbox.js"
 import plugin from "../src/index.js"
@@ -16,6 +17,8 @@ export interface SpawnInput {
   description: string
   prompt: string
   background: boolean
+  /** Set when the executor is asked to prompt a child that already exists. */
+  sessionID?: string
 }
 
 export interface SpawnContext {
@@ -105,13 +108,16 @@ function makeWorld() {
     input: {},
     execute: (input: SpawnInput, context: SpawnContext) =>
       new Promise((resolve, reject) => {
-        const childID = `ses_child${spawns.length + 1}`
-        sessions.set(childID, {
-          parentID: context.sessionID,
-          title: input.description,
-          cost: 0.01,
-          tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 0, write: 0 } },
-        })
+        // A call that names a session prompts that child again; it creates none.
+        const childID = input.sessionID ?? `ses_child${spawns.length + 1}`
+        if (!sessions.has(childID)) {
+          sessions.set(childID, {
+            parentID: context.sessionID,
+            title: input.description,
+            cost: 0.01,
+            tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 0, write: 0 } },
+          })
+        }
         flight.now += 1
         flight.max = Math.max(flight.max, flight.now)
         const done = <T>(value: T): T => {
@@ -140,8 +146,9 @@ function makeWorld() {
             ),
           fail: (message: string) => reject(done(new Error(message))),
         })
-        // A spawn whose `session.created` never arrives leaves the child unnamed.
-        if (announceChildren) {
+        // A spawn whose `session.created` never arrives leaves the child unnamed, and a
+        // continued child was announced by the call that created it.
+        if (announceChildren && !input.sessionID) {
           emit({
             type: "session.created",
             data: { sessionID: childID, parentID: context.sessionID, title: input.description },
@@ -152,6 +159,9 @@ function makeWorld() {
 
   const gets: string[] = []
   const prompts: Prompt[] = []
+  const moves: { sessionID: string; directory: string }[] = []
+  let moveFails = false
+  let moveDelayMs = 0
   const interruptCalls: { sessionID: string; continue: boolean }[] = []
   let inbox = 0
   const session = {
@@ -164,9 +174,18 @@ function makeWorld() {
     interrupt: async ({ sessionID, continue: resume }: { sessionID: string; continue?: boolean }) => {
       interrupts.push(sessionID)
       interruptCalls.push({ sessionID, continue: resume === true })
-      // `continue: true` resumes the steered items, so the spawn is not cancelled.
-      if (!resume) spawns.find((spawn) => spawn.childID === sessionID)?.fail(`Subagent cancelled (sessionID: ${sessionID})`)
+      // `continue: true` resumes the steered items, so the spawn is not cancelled. A child
+      // can have been prompted more than once, and only the newest call is still pending.
+      const pending = [...spawns].reverse().find((spawn) => spawn.childID === sessionID)
+      if (!resume) pending?.fail(`Subagent cancelled (sessionID: ${sessionID})`)
       return {}
+    },
+    move: async (input: { sessionID: string; directory: string }) => {
+      if (moveFails) throw new Error("the directory does not exist")
+      moves.push(input)
+      // The real call boots the location instance of the destination first.
+      if (moveDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, moveDelayMs))
+      return undefined
     },
     prompt: async (input: Prompt) => {
       if (promptFails) throw new Error("the session is gone")
@@ -223,6 +242,7 @@ function makeWorld() {
     interrupts,
     interruptCalls,
     prompts,
+    moves,
     synthetic,
     sessions,
     gets,
@@ -238,6 +258,18 @@ function makeWorld() {
     /** Scripts the event that marks an inbox item as taken. */
     deliver: (inboxID: string, sessionID: string) => {
       emit({ type: "session.inbox.delivered", data: { inboxID, sessionID } })
+    },
+    /** Scripts the event a session publishes once it arrived in its new directory. */
+    move: (sessionID: string, directory: string) => {
+      emit({ type: "session.moved", data: { sessionID, location: { directory } } })
+    },
+    /** Makes every later `session.move` reject, as a missing directory would. */
+    setMoveFails: (value: boolean) => {
+      moveFails = value
+    },
+    /** How long `session.move` takes to come back, as booting a location instance does. */
+    setMoveDelay: (ms: number) => {
+      moveDelayMs = ms
     },
     /** Scripts the permission a member session asked the user for. */
     ask: (sessionID: string, requestID: string, action = "bash", resource = "rm -rf /") => {
@@ -289,10 +321,24 @@ export interface Fake extends World {
   cleanup: Plugin.Cleanup | void
 }
 
-/** Boots the plugin against a hand-rolled context. */
+/**
+ * Boots the plugin against a hand-rolled context.
+ *
+ * The engine map is module state, so every boot starts from an empty one. A test that
+ * needs a second instance of the same project passes `share: true`, which is what a
+ * worktree directory does in a live process.
+ */
 export async function startPlugin(
-  options: { options?: unknown; directory?: string; subagent?: boolean; projectID?: string } = {},
+  options: {
+    options?: unknown
+    directory?: string
+    subagent?: boolean
+    projectID?: string
+    /** Attaches to the engine an earlier boot built instead of starting from nothing. */
+    share?: boolean
+  } = {},
 ): Promise<Fake> {
+  if (!options.share) resetEngines()
   const world = makeWorld()
   const added: WorkflowTool[] = []
   const commands: CommandDefinition[] = []
@@ -429,6 +475,8 @@ export function startRunner(
     config?: Partial<WorkflowConfig>
     /** How often a timed-out task asks for its child. Short, so a test does not wait. */
     childPollMs?: number
+    /** How long the move of an idle member gets. Short, so a test does not wait. */
+    moveTimeoutMs?: number
   } = {},
 ): RunnerFake {
   const world = makeWorld()
@@ -460,9 +508,17 @@ export function startRunner(
     now: options.now,
     pollIntervalMs: options.pollIntervalMs ?? 5,
     childPollMs: options.childPollMs ?? 1,
+    moveTimeoutMs: options.moveTimeoutMs ?? 2000,
   })
   const aborter = new AbortController()
-  const events = consumeEvents({ subscribe: world.subscribe, roster, store, mailbox, signal: aborter.signal })
+  const events = consumeEvents({
+    subscribe: world.subscribe,
+    roster,
+    store,
+    mailbox,
+    runner,
+    signal: aborter.signal,
+  })
 
   return {
     ...world,

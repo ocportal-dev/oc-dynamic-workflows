@@ -9,6 +9,8 @@ export interface WorkflowConfig {
   mailboxMaxMessages: number
   /** Whether `kind: "shell"` tasks are accepted. Shell tasks bypass the permission rules. */
   shellTasks: boolean
+  /** Whether `isolation: "worktree"` is accepted. A worktree task runs in its own checkout. */
+  worktrees: boolean
   /** The time one task gets when its spec sets no `timeoutMs`. */
   defaultTaskTimeoutMs: number
   /** The time one whole run gets. Past it the run stops and ends as `partial`. */
@@ -21,6 +23,7 @@ const DEFAULTS: WorkflowConfig = {
   maxAgents: 100,
   mailboxMaxMessages: 20,
   shellTasks: true,
+  worktrees: true,
   defaultTaskTimeoutMs: 900_000,
   maxRunMinutes: 120,
 }
@@ -46,6 +49,7 @@ export function resolveConfig(options: unknown): { config: WorkflowConfig; warni
         warnings,
       ),
       shellTasks: booleanOption(raw.shellTasks, DEFAULTS.shellTasks, "options.shellTasks", warnings),
+      worktrees: booleanOption(raw.worktrees, DEFAULTS.worktrees, "options.worktrees", warnings),
       defaultTaskTimeoutMs: numberOption(
         raw.defaultTaskTimeoutMs,
         DEFAULTS.defaultTaskTimeoutMs,

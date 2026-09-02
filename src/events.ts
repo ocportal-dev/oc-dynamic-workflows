@@ -12,6 +12,8 @@ export interface EventDeps {
   signal: AbortSignal
   /** Marks a steer delivered once the member's inbox took it. */
   mailbox?: { observeDelivered: (inboxID: string) => void }
+  /** Told when a member arrived in its worktree, so the waiter of the move resolves. */
+  runner?: { observeMoved: (sessionID: string) => void }
 }
 
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -19,9 +21,10 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000]
 /**
  * Reads the event stream for as long as the plugin is loaded.
  *
- * `session.created` names the child of a spawn. `session.usage.updated` keeps the run
- * record's spend current between task settles. `session.execution.failed` records why a
- * member stopped. `session.inbox.delivered` marks a steer as taken. The permission events
+ * `session.created` names the child of a spawn. `session.moved` says a member arrived in
+ * its worktree. `session.usage.updated` keeps the run record's spend current between task
+ * settles. `session.execution.failed` records why a member stopped.
+ * `session.inbox.delivered` marks a steer as taken. The permission events
  * say what a member waits for and whether the user refused it. The stream can end on its
  * own, so the loop resubscribes with a backoff.
  */
@@ -63,6 +66,12 @@ async function route(event: unknown, deps: EventDeps): Promise<void> {
       parentID: typeof payload.parentID === "string" ? payload.parentID : undefined,
       title: typeof payload.title === "string" ? payload.title : undefined,
     })
+    return
+  }
+
+  // Both the old and the new location see this one, so the handler is idempotent.
+  if (type === "session.moved") {
+    deps.runner?.observeMoved(sessionID)
     return
   }
 

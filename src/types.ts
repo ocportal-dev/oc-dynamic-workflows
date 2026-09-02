@@ -8,6 +8,10 @@ export interface TaskSpec {
   /** Required when `kind` is `"shell"`. */
   command?: string
   agent?: string
+  /** `"worktree"` runs the task in its own git worktree of HEAD. */
+  isolation?: "worktree"
+  /** Worktree tasks only: leave the worktree in place after the task settled. */
+  keep: boolean
   retries: number
   timeoutMs?: number
   /** JSON Schema. Validated after the task returns. */
@@ -61,6 +65,13 @@ export interface TaskRecord {
   rejected?: { requestID: string; action?: string; resource?: string; at: string }
   /** What the lead told this task on a resume. Kept, so a later resume reuses it. */
   guidance?: string
+  /**
+   * The git worktree of an `isolation: "worktree"` task.
+   *
+   * Written when the worktree is created, so a restart can still find it, and written
+   * again when the attempt settles, with the patch of the member's edits and its stat.
+   */
+  worktree?: { path: string; kept: boolean; patch?: string; stat: string }
   /** The sum of every attempt. Derived from `attemptsUsage`, so a retry adds to it. */
   usage: { usd: number; tokens: number }
   /** What each attempt spent, keyed by its child session id. A retry is a new key. */
@@ -95,6 +106,13 @@ export interface RunRecord {
   leadSessionID: string
   /** The agent forged into the spawn context. */
   leadAgent: string
+  /**
+   * The home of this run: the directory of the session that started it.
+   *
+   * Shell tasks, the worktrees, the patches, and the JSON mirror go there. Absent on a
+   * record written before the field existed; the runner then falls back to its own.
+   */
+  directory?: string
   createdAt: string
   updatedAt: string
   /** How often `workflow_resume` restarted this run. */

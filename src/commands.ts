@@ -26,7 +26,8 @@ const DETACHED = [
 const DEFAULTS = [
   'Use a "parallel" phase for tasks that do not need each other, a "sequential" phase when a task needs',
   'the result of the one before it, and a "team" phase only when the members have to ask you questions',
-  'while they work. Set "retries": 1 on every task. Do not set "model" or "isolation".',
+  'while they work. Set "retries": 1 on every task. Do not set "model". Set "isolation": "worktree"',
+  'only when a task edits files and has to stay out of the main checkout.',
 ].join("\n")
 
 /**

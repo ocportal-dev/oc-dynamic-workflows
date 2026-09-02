@@ -7,6 +7,7 @@ const DEFAULTS = {
   maxAgents: 100,
   mailboxMaxMessages: 20,
   shellTasks: true,
+  worktrees: true,
   defaultTaskTimeoutMs: 900_000,
   maxRunMinutes: 120,
 }
@@ -30,6 +31,7 @@ it("keeps valid values", () => {
     maxAgents: 12,
     mailboxMaxMessages: 5,
     shellTasks: false,
+    worktrees: false,
     defaultTaskTimeoutMs: 60_000,
     maxRunMinutes: 30,
   })
@@ -39,10 +41,19 @@ it("keeps valid values", () => {
     maxAgents: 12,
     mailboxMaxMessages: 5,
     shellTasks: false,
+    worktrees: false,
     defaultTaskTimeoutMs: 60_000,
     maxRunMinutes: 30,
   })
   expect(warnings).toEqual([])
+})
+
+it("reads the worktrees option", () => {
+  expect(resolveConfig({}).config.worktrees).toBe(true)
+  expect(resolveConfig({ worktrees: false }).config.worktrees).toBe(false)
+  const bad = resolveConfig({ worktrees: "no" })
+  expect(bad.config.worktrees).toBe(true)
+  expect(bad.warnings).toContain("options.worktrees must be true or false; using true")
 })
 
 it("trims the default agent", () => {
@@ -81,6 +92,7 @@ it("falls back and warns on garbage values", () => {
     maxAgents: Number.NaN,
     mailboxMaxMessages: {},
     shellTasks: "yes",
+    worktrees: "no",
   })
   expect(config).toEqual(DEFAULTS)
   expect(warnings).toEqual([
@@ -89,5 +101,6 @@ it("falls back and warns on garbage values", () => {
     "options.maxAgents must be a number; using 100",
     "options.mailboxMaxMessages must be a number; using 20",
     "options.shellTasks must be true or false; using true",
+    "options.worktrees must be true or false; using true",
   ])
 })

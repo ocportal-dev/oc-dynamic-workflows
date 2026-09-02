@@ -4,6 +4,7 @@ import type { WorkflowSpec } from "./types.js"
 export interface SpecLimits {
   maxAgents: number
   shellTasks: boolean
+  worktrees: boolean
 }
 
 export type ParseResult = { ok: true; spec: WorkflowSpec } | { ok: false; errors: string[] }
@@ -12,8 +13,9 @@ export type ParseResult = { ok: true; spec: WorkflowSpec } | { ok: false; errors
 export const DSL = [
   'A spec is JSON with "specVersion": 1, "name", "goal", and "phases".',
   'A phase has "id", "strategy" ("sequential", "parallel", or "team"), "tasks", and an optional "synthesisPrompt".',
-  'A task has "id", "kind" ("agent" with a "prompt", or "shell" with a "command"), and optional "agent", "retries" (0-3), "timeoutMs", and "outputSchema".',
-  'Set the model on the agent: "model" and "isolation" on a task are rejected.',
+  'A task has "id", "kind" ("agent" with a "prompt", or "shell" with a "command"), and optional "agent", "retries" (0-3), "timeoutMs", "outputSchema", "isolation", and "keep".',
+  'Set the model on the agent: "model" on a task is rejected.',
+  '"isolation": "worktree" runs the task in its own git worktree of HEAD; edits are saved as a patch and the worktree is removed unless "keep": true.',
   'A "team" phase runs like "parallel" and opens the mailbox: its members use team_send, and you use team_steer and team_inbox.',
 ].join("\n")
 
@@ -38,6 +40,7 @@ const Task = z.strictObject({
   retries: z.number().int().min(0).max(3).default(0),
   timeoutMs: z.number().int().min(5_000).max(1_800_000).optional(),
   isolation: z.literal("worktree").optional(),
+  keep: z.boolean().default(false),
   outputSchema: z.record(z.string(), z.unknown()).optional(),
 })
 
@@ -115,12 +118,15 @@ function workflowSchema(limits: SpecLimits) {
             message: "task.model is not supported in v1: set the model on the agent",
           })
         }
-        if (task.isolation !== undefined) {
+        if (task.isolation !== undefined && !limits.worktrees) {
           ctx.addIssue({
             code: "custom",
             path: at("isolation"),
-            message: 'isolation: "worktree" is not supported in v1',
+            message: 'isolation: "worktree" is disabled in the plugin options (worktrees: false)',
           })
+        }
+        if (task.keep && task.isolation !== "worktree") {
+          ctx.addIssue({ code: "custom", path: at("keep"), message: 'task.keep needs isolation: "worktree"' })
         }
       }
     }
@@ -186,7 +192,19 @@ const KEYS = {
   workflow: ["specVersion", "name", "goal", "budget", "phases"],
   budget: ["usd", "tokens"],
   phase: ["id", "title", "strategy", "tasks", "synthesisPrompt", "mailbox"],
-  task: ["id", "description", "kind", "prompt", "command", "agent", "retries", "timeoutMs", "outputSchema"],
+  task: [
+    "id",
+    "description",
+    "kind",
+    "prompt",
+    "command",
+    "agent",
+    "retries",
+    "timeoutMs",
+    "isolation",
+    "keep",
+    "outputSchema",
+  ],
   mailbox: ["peers", "maxMessages"],
 }
 

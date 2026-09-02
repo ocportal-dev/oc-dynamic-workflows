@@ -9,7 +9,7 @@ const SPEC: WorkflowSpec = {
   specVersion: 1,
   name: "demo",
   goal: "do the thing",
-  phases: [{ id: "one", strategy: "parallel", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0 }] }],
+  phases: [{ id: "one", strategy: "parallel", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0, keep: false }] }],
 }
 
 const project = (): Promise<string> => mkdtemp(join(tmpdir(), "workflows-"))

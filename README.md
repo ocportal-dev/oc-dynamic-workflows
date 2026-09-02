@@ -60,6 +60,7 @@ turn the model loads it.
 | `maxAgents` | integer | `100` | The ceiling on the number of tasks in one workflow. Clamped to 1..1000. |
 | `mailboxMaxMessages` | integer | `20` | The message cap a team phase gets when its spec sets none. Clamped to 1..50. |
 | `shellTasks` | boolean | `true` | Whether `kind: "shell"` tasks are accepted. Shell tasks run in process and bypass the permission rules. Set it to `false` to reject them. See the warning below. |
+| `worktrees` | boolean | `true` | Whether `isolation: "worktree"` is accepted. Set it to `false` to reject a spec that asks for one. See "Worktree isolation" below. |
 | `defaultTaskTimeoutMs` | integer | `900000` | The time one task gets when it sets no `timeoutMs`. Clamped to 5000..1800000. |
 | `maxRunMinutes` | integer | `120` | The time one run gets. Past it the remaining work is dropped and the run ends as `partial`. Clamped to 5..1440. |
 
@@ -105,8 +106,8 @@ in, and the model reads that prompt and calls the tool.
 The prompt a goal produces carries the same spec summary the tools carry, plus the
 defaults to use: a `parallel` phase for tasks that do not need each other, a `sequential`
 phase when a task needs the result of the one before it, a `team` phase only when the
-members have to ask questions while they work, `retries: 1`, and no `model` or
-`isolation`.
+members have to ask questions while they work, `retries: 1`, no `model`, and
+`isolation: "worktree"` only for a task that edits files.
 
 ## Spec
 
@@ -156,13 +157,51 @@ A spec is JSON. `specVersion` must be `1`.
 | `agent` | task | Optional. Falls back to `defaultAgent`. |
 | `retries` | task | 0 to 3. Default 0. |
 | `timeoutMs` | task | 5000 to 1800000. |
+| `isolation` | task | Optional. `"worktree"` runs the task in its own git worktree of `HEAD`. See below. |
+| `keep` | task | Optional, default `false`. Leaves the worktree in place. Only with `isolation: "worktree"`. |
 | `outputSchema` | task | Optional JSON Schema for the task result. See below. |
 
 ### Not supported in version 1
 
 - `task.model` — set the model on the agent instead.
-- `task.isolation: "worktree"`.
 - `mailbox.peers: true`.
+
+### Worktree isolation
+
+A task with `"isolation": "worktree"` gets its own checkout, so it can edit files without
+touching the working tree the user is in.
+
+1. The engine runs `git worktree add --detach` at `HEAD` under
+   `.opencode/workflows/worktrees/<runId>/<taskId>` of the run's home, which is the
+   directory of the session that started it. That directory carries a `.gitignore`
+   of `*`, so the checkout it lives in does not see it.
+2. An agent task goes through three steps, because a child session inherits the lead's
+   directory and a move only lands at a step boundary. The member is spawned with a warm-up
+   prompt ("Reply with the single word ready and call no tools."), which leaves it idle. It
+   is then moved with `ctx.session.move`, and an idle session applies a move with no model
+   request. Once `session.moved` arrives it is prompted with its real task, in the same
+   session. Nothing is interrupted: a warm-up or a move that does not come back within a
+   minute fails the attempt, and a retry gets a new session and a fresh worktree.
+3. A shell task runs with its working directory set to the worktree. No session is moved.
+4. When the attempt settles, whatever the outcome, everything is staged and
+   `git diff --cached HEAD` is written to
+   `.opencode/workflows/runs/<runId>/<taskId>.patch`. An empty diff writes no file, and
+   removes the one an earlier attempt left. The stat of that diff goes on the task record
+   and into the final report.
+5. The worktree is then removed, unless the task set `"keep": true`, and the run's own
+   directory goes with the last worktree in it. A retry gets a fresh one and overwrites the
+   patch.
+
+Two things follow from starting at `HEAD`:
+
+- The uncommitted changes and the untracked files of the main checkout are **not** in the
+  worktree. That includes an uncommitted `.opencode/` agent, command, or skill.
+- The worktree is another location, so opencode boots every plugin for it, this one
+  included. This plugin keeps one engine per project, shared by every one of its
+  instances, so the member is still part of its run there. A run stays anchored to the
+  directory it was started from, whichever instance happened to build that engine first.
+
+Set `"worktrees": false` in the plugin options to reject a spec that asks for one.
 
 ### Task output schema
 
@@ -319,8 +358,6 @@ The calling session is not woken. `workflow_status` on such a run ends with
 
 - **No `task.model`.** Set the model on the agent. The subagent executor uses
   `agent.model ?? parent.model` and takes no override.
-- **No worktree isolation.** `task.isolation: "worktree"` is rejected. A session in another
-  directory is served by another plugin instance with its own memory.
 - **No peer chat.** A member talks to the lead and to nobody else. `mailbox.peers: true` is
   rejected.
 - **No scripts in a spec.** A spec holds prompts and shell commands. Nothing in it is

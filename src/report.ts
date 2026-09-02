@@ -11,6 +11,8 @@ export function renderSpecTree(spec: WorkflowSpec): string {
       if (task.agent) parts.push(`agent=${task.agent}`)
       parts.push(`retries=${task.retries}`)
       if (task.timeoutMs !== undefined) parts.push(`timeoutMs=${task.timeoutMs}`)
+      if (task.isolation === "worktree") parts.push("worktree")
+      if (task.keep) parts.push("keep")
       lines.push(`  - ${task.id} (${parts.join(", ")})`)
     }
   }
@@ -135,9 +137,15 @@ export function renderFinalReport(run: RunRecord): string {
 
   for (const phase of run.phases) {
     for (const task of phase.tasks) {
-      if (!task.output) continue
-      lines.push(`Output of ${task.taskId} (${task.status}):`)
-      lines.push(wrapUntrusted(task.kind, task.taskId, clip(task.output, REPORT_LIMIT)))
+      // What the member changed is a result of its own, so a task with no output but a
+      // worktree is still named.
+      const worktree = renderWorktree(task)
+      if (!task.output && !worktree) continue
+      if (task.output) {
+        lines.push(`Output of ${task.taskId} (${task.status}):`)
+        lines.push(wrapUntrusted(task.kind, task.taskId, clip(task.output, REPORT_LIMIT)))
+      }
+      if (worktree) lines.push(worktree)
       lines.push("")
     }
   }
@@ -181,9 +189,19 @@ function renderTask(task: TaskRecord): string {
   if (task.attempts > 1) parts.push(`attempts=${task.attempts}`)
   if (task.usage.usd > 0 || task.usage.tokens > 0) parts.push(`$${task.usage.usd.toFixed(4)}`, `${task.usage.tokens}t`)
   if (task.status === "running" && task.asked) parts.push(`waiting for permission: ${describePermission(task.asked)}`)
+  if (task.worktree) parts.push(`worktree ${task.worktree.path}`)
   if (task.guidance) parts.push(`guidance: ${short(task.guidance, 80)}`)
   if (task.error) parts.push(task.error)
   return parts.join("  ")
+}
+
+/** Where the edits of a worktree task went. One line, whatever the stat says. */
+function renderWorktree(task: TaskRecord): string | undefined {
+  const worktree = task.worktree
+  if (!worktree) return undefined
+  const stat = worktree.stat.split("\n")[0]?.trim() || "no changes"
+  const where = worktree.kept ? `; kept at ${worktree.path}` : worktree.patch ? `; patch ${worktree.patch}` : ""
+  return `Worktree of ${task.taskId}: ${stat}${where}`
 }
 
 /** One line stays one line, so a long text is cut instead of wrapped. */

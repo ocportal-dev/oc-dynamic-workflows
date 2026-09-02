@@ -98,7 +98,10 @@ Task ids are unique across the whole workflow, not only inside one phase.
 
 ## Defaults
 
-- Set \`"retries": 1\` on every task. Do not set \`model\` or \`isolation\`.
+- Set \`"retries": 1\` on every task. Do not set \`model\`.
+- Set \`"isolation": "worktree"\` only when a task edits files and has to stay out of the main
+  checkout. The task gets its own checkout of \`HEAD\`, its edits are saved as a patch, and the
+  worktree is removed unless the task sets \`"keep": true\`.
 - Leave \`agent\` out unless the user names one. It falls back to \`${config.defaultAgent}\`.
 - Leave \`timeoutMs\` out unless a task is unusually long. The default is ${minutes(config.defaultTaskTimeoutMs)} per task,
   and ${config.maxRunMinutes} minutes for the whole run.
@@ -214,7 +217,8 @@ member that is going the wrong way.
 - Do not poll. Never call \`workflow_status\` in a loop, and never wait for a run to end. The
   report comes to you.
 - Do not start a workflow for one task. Call \`subagent\`.
-- Do not set \`task.model\` or \`task.isolation\`. Both are rejected. Set the model on the agent.
+- Do not set \`task.model\`. It is rejected. Set the model on the agent.
+- Do not set \`"isolation": "worktree"\` on a read-only task. It buys a checkout for nothing.
 - Do not use a \`team\` phase when the members need no answers. Use \`parallel\`.
 - Do not write a prompt that says "as discussed above". The member has no context but its prompt.
 - Do not save a spec to \`.opencode/workflows/\` unless the user asks for it.

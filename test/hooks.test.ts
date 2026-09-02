@@ -9,7 +9,7 @@ const SPEC: WorkflowSpec = {
   specVersion: 1,
   name: "chain",
   goal: "do it in order",
-  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0 }] }],
+  phases: [{ id: "p", strategy: "sequential", tasks: [{ id: "a", kind: "agent", prompt: "go", retries: 0, keep: false }] }],
 }
 
 function request(sessionID: string) {
