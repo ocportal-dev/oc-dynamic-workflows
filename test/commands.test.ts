@@ -42,6 +42,18 @@ it("passes a JSON spec through unchanged", async () => {
   expect(sent!.text).not.toContain("Write a workflow spec")
 })
 
+it("recognises a JSON spec that has phases and no specVersion", async () => {
+  const fake = await startPlugin()
+  const loose = '{"name": "demo", "goal": "do the thing", "phases": []}'
+  await fake.slash("workflow", loose)
+
+  const [sent] = fake.prompts
+  expect(sent!.text).toContain(loose)
+  expect(sent!.text).toContain("Call workflow_run with exactly this spec, unchanged")
+  expect(sent!.text).toContain("the loader filled in")
+  expect(sent!.text).not.toContain("Write a workflow spec")
+})
+
 it("asks for a goal when the command carries no argument", async () => {
   const fake = await startPlugin()
   await fake.slash("workflow", "")

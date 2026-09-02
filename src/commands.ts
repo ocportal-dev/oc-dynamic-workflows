@@ -91,6 +91,7 @@ export function workflowEnvelope(text: string): string {
       "Call workflow_run with exactly this spec, unchanged:",
       spec,
       "Do not edit it. If workflow_run answers with errors, show them and ask what to change.",
+      "The tool result lists any field the loader filled in; repeat that list to the user.",
       DETACHED,
     ].join("\n")
   }
@@ -147,13 +148,13 @@ export function resumeEnvelope(runId: string): string {
   ].join("\n")
 }
 
-/** The argument text, when it is a JSON object that names a spec version. */
+/** The argument text, when it is a JSON object that names a spec version or its phases. */
 function asSpec(text: string): string | undefined {
   if (!text.startsWith("{")) return undefined
   try {
     const parsed: unknown = JSON.parse(text)
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
-    return "specVersion" in parsed ? text : undefined
+    return "specVersion" in parsed || Array.isArray((parsed as { phases?: unknown }).phases) ? text : undefined
   } catch {
     return undefined
   }

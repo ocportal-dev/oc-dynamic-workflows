@@ -55,6 +55,8 @@ const Outcome = z.object({
   error: z.string().optional(),
   errors: z.array(z.string()).optional(),
   spec: z.record(z.string(), z.unknown()).optional(),
+  /** The fields the loader filled in. A start sets it, empty when the spec was complete. */
+  warnings: z.array(z.string()).optional(),
   names: z.array(z.string()).optional(),
   /** Whether the built-in subagent executor was captured. Members cannot be spawned without it. */
   executor: z.enum(["available", "missing"]).optional(),
@@ -126,11 +128,21 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       overrides,
     })
     const spec = { ...parsed.spec }
+    const filled = parsed.warnings.length
+      ? [
+          `filled in ${parsed.warnings.length} missing ${parsed.warnings.length === 1 ? "field" : "fields"}:`,
+          ...parsed.warnings.map((warning) => `  - ${warning}`),
+        ]
+      : []
     return {
-      content: [`started run ${runId}`, DETACHED, `subagent executor: ${executor}`, renderSpecTree(parsed.spec)].join(
-        "\n",
-      ),
-      output: { ok: true, runId, spec, executor },
+      content: [
+        `started run ${runId}`,
+        ...filled,
+        DETACHED,
+        `subagent executor: ${executor}`,
+        renderSpecTree(parsed.spec),
+      ].join("\n"),
+      output: { ok: true, runId, spec, executor, warnings: parsed.warnings },
     }
   }
 

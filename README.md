@@ -98,7 +98,7 @@ in, and the model reads that prompt and calls the tool.
 
 | Command | Argument | What the prompt says |
 |---------|----------|----------------------|
-| `/workflow` | a goal, or a JSON spec | With a goal: write a `specVersion: 1` spec for it, show it, then call `workflow_run`. With a JSON object that has `specVersion`: call `workflow_run` with exactly that spec, unchanged. |
+| `/workflow` | a goal, or a JSON spec | With a goal: write a `specVersion: 1` spec for it, show it, then call `workflow_run`. With a JSON object that has `specVersion` or `phases`: call `workflow_run` with exactly that spec, unchanged. |
 | `/workflow-status` | `runId`, optional | Call `workflow_status` and summarise it in three lines. |
 | `/workflow-resume` | `runId` | Call `workflow_resume` with that run id. |
 | `/workflow-cancel` | `runId`, optional | Call `workflow_cancel` with that run id. Without one, read the latest run with `workflow_status` first, then cancel it. |
@@ -177,14 +177,17 @@ more than one field, which the plugin reports when the spec is run:
 The `name` and `type` aliases are resolved before the check, so the schema does not list
 them: an editor flags them as unknown keys even though the plugin accepts them.
 
+The schema keeps `specVersion` and both `id` fields required, although the loader fills a
+missing one in: a spec written in an editor should carry them.
+
 ### Fields
 
 | Field | Where | Notes |
 |-------|-------|-------|
-| `specVersion` | workflow | Must be `1`. |
+| `specVersion` | workflow | Must be `1`. Filled in when missing, with a warning in the tool result. |
 | `name`, `goal` | workflow | Required text. |
 | `budget.usd` / `budget.tokens` | workflow | Optional. Set at least one when `budget` is present. |
-| `id` | phase, task | Required. `name` is accepted as an alias. Task ids are unique across the whole workflow. |
+| `id` | phase, task | Filled in when missing (`phase-1`, `task-1`, ...), with a warning in the tool result. `name` is accepted as an alias. Task ids are unique across the whole workflow. |
 | `strategy` | phase | `sequential`, `parallel`, or `team`. Default `parallel`. `type` is accepted as an alias. |
 | `synthesisPrompt` | phase | Optional. Joins the outputs of the phase into one summary. |
 | `mailbox` | phase | Only on a `team` phase. `{ "maxMessages": 20 }`, 1 to 50. |

@@ -28,6 +28,12 @@ const parsed = (input: unknown, limits: SpecLimits = LIMITS) => {
   return result.spec
 }
 
+const warnings = (input: unknown, limits: SpecLimits = LIMITS): string[] => {
+  const result = parseSpec(input, limits)
+  if (!result.ok) throw new Error(`expected the spec to be accepted: ${result.errors.join("; ")}`)
+  return result.warnings
+}
+
 it("accepts a sequential workflow with a shell task", async () => {
   const workflow = parsed(await fixture("sequential"))
   expect(workflow.phases[0]!.strategy).toBe("sequential")
@@ -76,10 +82,66 @@ it("rejects a value that is not an object", () => {
   expect(errors(42)).toEqual(["spec: must be an object or a JSON object string"])
 })
 
-it("rejects a missing specVersion", () => {
-  const spec2 = spec()
-  delete spec2.specVersion
-  expect(errors(spec2).join("\n")).toContain("specVersion:")
+it("fills in a missing specVersion", () => {
+  const input = spec()
+  delete input.specVersion
+  expect(parsed(input).specVersion).toBe(1)
+  expect(warnings(input)).toEqual(["specVersion: missing, set to 1"])
+})
+
+it("fills in a missing phase id and the missing task ids", () => {
+  const input = spec({
+    phases: [
+      { tasks: [{ prompt: "one" }, { prompt: "two" }] },
+      { id: "second", tasks: [{ id: "kept", prompt: "three" }] },
+    ],
+  })
+  const workflow = parsed(input)
+  expect(workflow.phases[0]!.id).toBe("phase-1")
+  expect(workflow.phases[0]!.tasks.map((task) => task.id)).toEqual(["task-1", "task-2"])
+  expect(workflow.phases[1]!.id).toBe("second")
+  expect(workflow.phases[1]!.tasks[0]!.id).toBe("kept")
+  expect(warnings(input)).toEqual([
+    'phases[0].id: missing, set to "phase-1"',
+    'phases[0].tasks[0].id: missing, set to "task-1"',
+    'phases[0].tasks[1].id: missing, set to "task-2"',
+  ])
+})
+
+it("skips a generated task id an explicit task already uses", () => {
+  const input = spec({
+    phases: [
+      { id: "one", tasks: [{ prompt: "one" }] },
+      { id: "two", tasks: [{ id: "task-1", prompt: "two" }] },
+    ],
+  })
+  expect(parsed(input).phases[0]!.tasks[0]!.id).toBe("task-2")
+  expect(warnings(input)).toEqual(['phases[0].tasks[0].id: missing, set to "task-2"'])
+})
+
+it("reports no warning for a complete spec", () => {
+  expect(warnings(spec())).toEqual([])
+})
+
+it("maps the task name alias to the id with no warning", () => {
+  const input = spec({ phases: [{ id: "one", tasks: [{ name: "look", prompt: "go" }] }] })
+  expect(parsed(input).phases[0]!.tasks[0]!.id).toBe("look")
+  expect(warnings(input)).toEqual([])
+})
+
+it("rejects specVersion 2, an empty id, and a null id", () => {
+  expect(errors(spec({ specVersion: 2 })).join("\n")).toContain("specVersion:")
+  expect(errors(spec({ phases: [{ id: "", tasks: [{ id: "a", prompt: "go" }] }] })).join("\n")).toContain(
+    "phases[0].id:",
+  )
+  expect(errors(spec({ phases: [{ id: null, tasks: [{ id: "a", prompt: "go" }] }] })).join("\n")).toContain(
+    "phases[0].id:",
+  )
+})
+
+it("reports the error of a spec that also has a field to fill in", () => {
+  const messages = errors(spec({ phases: [{ tasks: [{ prompt: "go", timeout: 60_000 }] }] }))
+  expect(messages).toEqual(['phases[0].tasks[0]: unknown key "timeout"; did you mean "timeoutMs"?'])
 })
 
 it("rejects more than three retries", () => {

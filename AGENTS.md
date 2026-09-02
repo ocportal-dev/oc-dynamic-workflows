@@ -54,8 +54,9 @@ publish date. Install with `npm install --min-release-age=0`.
   nobody awaits ends in. A timer, an event handler, and a cleanup path never throw.
 - **`src/types.ts`** — The normalized `WorkflowSpec` plus `RunRecord`, `PhaseRecord`,
   `TaskRecord`, and `MailEvent`.
-- **`src/spec.ts`** — The Zod schema for `specVersion: 1`, the alias normalization, and the
-  v1 rejections. `parseSpec` returns either the spec or a list of one-line messages.
+- **`src/spec.ts`** — The Zod schema for `specVersion: 1`, the alias normalization, the fill
+  of a missing `specVersion` or `id`, and the v1 rejections. `parseSpec` returns either the
+  spec with one warning per filled field or a list of one-line messages.
 - **`src/engine.ts`** — `attach(prefix, build)` / `detach(prefix)`: the module-level, refcounted
   map of the one engine every plugin instance of a project shares, keyed by the storage prefix.
 - **`src/spec-store.ts`** — Reads and writes `<directory>/.opencode/workflows/<name>.json`.
@@ -292,6 +293,9 @@ live `opencode2` (spike S6).
   retry can fix it.
 - Saved workflow names are restricted to `[A-Za-z0-9._-]` and may not contain `..`, so a
   name cannot escape `.opencode/workflows/`.
+- A missing `specVersion`, phase `id`, or task `id` is filled at the edge, and the warning
+  travels in the tool result of `workflow_run` and `workflow_run_saved`. The Zod object, and
+  so the generated schema, keep the three fields required.
 - `$schema` is accepted at the edge and dropped by the normalizer, so a saved spec can point
   an editor at the schema and no spec ever carries the key onwards. The asset under `assets/`
   is generated, never hand-edited, and `test/schema.test.ts` fails when it drifts.

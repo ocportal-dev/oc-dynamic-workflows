@@ -7,7 +7,9 @@ export interface SpecLimits {
   worktrees: boolean
 }
 
-export type ParseResult = { ok: true; spec: WorkflowSpec } | { ok: false; errors: string[] }
+export type ParseResult =
+  | { ok: true; spec: WorkflowSpec; warnings: string[] }
+  | { ok: false; errors: string[] }
 
 /** The summary of the DSL that every tool and every command that reads a spec carries. */
 export const DSL = [
@@ -149,7 +151,8 @@ function workflowSchema(limits: SpecLimits) {
 
 /**
  * Parses a workflow spec. Accepts an object or a JSON string. Never throws: an invalid
- * spec comes back as a list of one-line messages.
+ * spec comes back as a list of one-line messages, and a spec that was filled in comes
+ * back with one warning per filled field.
  */
 export function parseSpec(input: unknown, limits: SpecLimits): ParseResult {
   let value = input
@@ -162,16 +165,21 @@ export function parseSpec(input: unknown, limits: SpecLimits): ParseResult {
   }
   if (!isRecord(value)) return { ok: false, errors: ["spec: must be an object or a JSON object string"] }
 
-  const result = workflowSchema(limits).safeParse(normalize(value))
+  const normalized = normalize(value)
+  const result = workflowSchema(limits).safeParse(normalized.value)
   if (!result.success) return { ok: false, errors: result.error.issues.map(formatIssue) }
-  return { ok: true, spec: result.data }
+  return { ok: true, spec: result.data, warnings: normalized.warnings }
 }
 
 /**
  * Accepts the aliases `name` (for `id`) and `type` (for `strategy`) before the parse, and
  * drops `$schema`, so the parsed spec never carries the editor hint.
+ *
+ * Then fills in a missing `specVersion`, phase `id`, and task `id`, and reports each one
+ * as a warning. Only an absent key is filled: an empty string, a `null`, and a wrong type
+ * stay errors from the parse.
  */
-function normalize(workflow: Record<string, unknown>): Record<string, unknown> {
+function normalize(workflow: Record<string, unknown>): { value: Record<string, unknown>; warnings: string[] } {
   const phases = Array.isArray(workflow.phases)
     ? workflow.phases.map((phase) => {
         if (!isRecord(phase)) return phase
@@ -183,7 +191,47 @@ function normalize(workflow: Record<string, unknown>): Record<string, unknown> {
       })
     : workflow.phases
   const { $schema: _editorHint, ...rest } = workflow
-  return { ...rest, phases }
+  const value: Record<string, unknown> = { ...rest, phases }
+  const warnings: string[] = []
+  const filled = (path: (string | number)[], id: string): void => {
+    warnings.push(`${formatPath(path)}: missing, set to "${id}"`)
+  }
+
+  if (value.specVersion === undefined) {
+    value.specVersion = 1
+    warnings.push("specVersion: missing, set to 1")
+  }
+
+  if (Array.isArray(phases)) {
+    // A generated id may not take the id an explicit task already has, wherever it sits.
+    const taken = new Set<string>()
+    for (const phase of phases) {
+      if (!isRecord(phase) || !Array.isArray(phase.tasks)) continue
+      for (const task of phase.tasks) if (isRecord(task) && typeof task.id === "string") taken.add(task.id)
+    }
+
+    let counter = 0
+    for (const [phaseIndex, phase] of phases.entries()) {
+      if (!isRecord(phase)) continue
+      if (phase.id === undefined) {
+        const id = `phase-${phaseIndex + 1}`
+        phase.id = id
+        filled(["phases", phaseIndex, "id"], id)
+      }
+      if (!Array.isArray(phase.tasks)) continue
+      for (const [taskIndex, task] of phase.tasks.entries()) {
+        counter += 1
+        if (!isRecord(task) || task.id !== undefined) continue
+        while (taken.has(`task-${counter}`)) counter += 1
+        const id = `task-${counter}`
+        task.id = id
+        taken.add(id)
+        filled(["phases", phaseIndex, "tasks", taskIndex, "id"], id)
+      }
+    }
+  }
+
+  return { value, warnings }
 }
 
 /** Copies `from` to `to` when `to` is absent, and drops the alias key either way. */

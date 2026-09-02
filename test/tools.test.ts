@@ -211,3 +211,42 @@ it("takes guidance on a resume and names the task ids the run does not have", as
   again.settle("done")
   await fake.run("workflow_cancel", { runId })
 })
+
+it("fills in the missing fields of a spec and lists them in the result", async () => {
+  const fake = await startPlugin()
+  const result = await fake.run("workflow_run", {
+    spec: { name: "loose", goal: "do the thing", phases: [{ tasks: [{ prompt: "go" }] }] },
+  })
+
+  const output = result.output as { ok: boolean; warnings: string[] }
+  expect(output.ok).toBe(true)
+  expect(output.warnings).toEqual([
+    "specVersion: missing, set to 1",
+    'phases[0].id: missing, set to "phase-1"',
+    'phases[0].tasks[0].id: missing, set to "task-1"',
+  ])
+  expect(result.content).toContain("filled in 3 missing fields:")
+  expect(result.content).toContain('  - phases[0].tasks[0].id: missing, set to "task-1"')
+})
+
+it("reports no filled field for a complete spec", async () => {
+  const fake = await startPlugin()
+  const result = await fake.run("workflow_run", { spec: SPEC })
+  expect((result.output as { warnings: string[] }).warnings).toEqual([])
+  expect(result.content).not.toContain("filled in")
+})
+
+it("fills in the specVersion of a saved spec", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "workflows-"))
+  await mkdir(join(directory, ".opencode", "workflows"), { recursive: true })
+  await writeFile(
+    join(directory, ".opencode", "workflows", "loose.json"),
+    JSON.stringify({ name: "loose", goal: "do the thing", phases: [{ id: "one", tasks: [{ id: "a", prompt: "go" }] }] }),
+    "utf8",
+  )
+  const fake = await startPlugin({ directory })
+
+  const result = await fake.run("workflow_run_saved", { name: "loose" })
+  expect((result.output as { warnings: string[] }).warnings).toEqual(["specVersion: missing, set to 1"])
+  expect(result.content).toContain("filled in 1 missing field:")
+})
