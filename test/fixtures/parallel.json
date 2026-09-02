@@ -1,0 +1,22 @@
+{
+  "specVersion": 1,
+  "name": "survey",
+  "goal": "Survey the three client apps and compare them.",
+  "phases": [
+    {
+      "id": "read",
+      "strategy": "parallel",
+      "synthesisPrompt": "Compare the three reports.",
+      "tasks": [
+        { "id": "ios", "prompt": "Summarise the iOS client." },
+        { "id": "android", "prompt": "Summarise the Android client." },
+        { "id": "web", "prompt": "Summarise the web client." }
+      ]
+    },
+    {
+      "id": "write",
+      "strategy": "sequential",
+      "tasks": [{ "id": "report", "prompt": "Write the comparison." }]
+    }
+  ]
+}

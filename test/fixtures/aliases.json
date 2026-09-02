@@ -1,0 +1,12 @@
+{
+  "specVersion": 1,
+  "name": "aliases",
+  "goal": "Use the phase and task aliases.",
+  "phases": [
+    {
+      "name": "explore",
+      "type": "sequential",
+      "tasks": [{ "name": "look", "prompt": "Look around." }]
+    }
+  ]
+}

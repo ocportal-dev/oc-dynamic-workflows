@@ -1,0 +1,23 @@
+{
+  "specVersion": 1,
+  "name": "release-notes",
+  "goal": "Draft the release notes for the next version.",
+  "budget": { "usd": 2 },
+  "phases": [
+    {
+      "id": "collect",
+      "title": "Collect the changes",
+      "strategy": "sequential",
+      "tasks": [
+        { "id": "log", "kind": "shell", "command": "git log --oneline -n 20" },
+        {
+          "id": "draft",
+          "prompt": "Draft the release notes from the commit log.",
+          "agent": "general",
+          "retries": 1,
+          "timeoutMs": 60000
+        }
+      ]
+    }
+  ]
+}

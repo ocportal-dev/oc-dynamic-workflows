@@ -1,0 +1,17 @@
+{
+  "specVersion": 1,
+  "name": "migration",
+  "goal": "Migrate the settings screen and keep the team in step.",
+  "budget": { "usd": 5, "tokens": 2000000 },
+  "phases": [
+    {
+      "id": "build",
+      "strategy": "team",
+      "mailbox": { "maxMessages": 8 },
+      "tasks": [
+        { "id": "ui", "prompt": "Migrate the settings UI." },
+        { "id": "data", "prompt": "Migrate the settings store." }
+      ]
+    }
+  ]
+}
