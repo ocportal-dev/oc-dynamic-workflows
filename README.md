@@ -89,7 +89,9 @@ A member session, which is one task of a run, cannot use `workflow_run`,
 `workflow_run_saved`, `workflow_resume`, `workflow_cancel`, `workflow_status`,
 `workflow_doctor`, `team_steer`, `team_inbox`, or the built-in `subagent` tool. The context
 hook takes those tools out of its request, and each one refuses a member again when it is
-called anyway. A member sees `team_send`, answers its prompt, and the lead reads the report.
+called anyway. That second lock is what holds under Code Mode, where the tool namespace does
+not come from the hook. A member sees `team_send`, answers its prompt, and the lead reads the
+report.
 
 ## Commands
 

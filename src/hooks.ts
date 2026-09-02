@@ -21,8 +21,11 @@ export interface HookDeps {
  * The tools a member session may not call.
  *
  * A member is a workflow task. It answers its prompt and stops. Starting another
- * workflow, cancelling one, or spawning further children is the lead's work, and core
- * rejects a call to a tool that is not in the request, so removing them here is enough.
+ * workflow, cancelling one, or spawning further children is the lead's work. Deleting a
+ * name here covers the direct path, where core rejects a call to a tool that was not in the
+ * request. Under Code Mode the tool namespace is built from the registry instead, so this
+ * map does not reach it, and every tool named here that this plugin owns refuses a member
+ * in its own executor. `subagent` is core's tool, and it is not in that namespace.
  */
 export const MEMBER_TOOLS = [
   "workflow_run",

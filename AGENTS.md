@@ -198,7 +198,16 @@ live `opencode2` (spike S6).
   retry. The event has a mutable `tools: Record<string, { description, input }>`, a
   mutable `system: SystemPart[]`, and `messages`. A `SystemPart` is an object,
   `{ type: "text", text }`, not a string. Deleting a key from `event.tools` is enforced:
-  core rejects a call to a tool that was not in the request (`core/src/tool.ts:252`).
+  core rejects a call to a tool that was not in the request (`core/src/tool.ts:252`). That
+  covers the direct path only. Under Code Mode the model gets one `execute` tool and calls
+  `tools.<name>(...)` in a namespace built from the global registry (`core/src/tool.ts:215-236`),
+  which the hook's `tools` map never reaches (`core/src/session/model-request.ts:296-322`), and
+  an inner call runs `tool.execute.before` and the executor without the check above
+  (`core/src/tool.ts:229-233`). A `tool.execute.before` from a promise plugin cannot fail
+  cleanly either: the adapter wraps the callback in `Effect.promise`
+  (`@opencode-ai/plugin/dist/promise/adapter.js:352`), so a rejection is a defect, and the
+  direct path catches `Tool.Error` only (`core/src/session/runner/step.ts:122`) and then fails
+  every unsettled tool call of the step (`step.ts:198-206`).
 - `ctx.generate.text({ prompt, model? })` resolves to `{ text }`. With no `model` it uses
   the catalog default. It can answer with an empty string, so an empty synthesis is
   recorded as a failure instead of being passed on.
@@ -225,6 +234,11 @@ live `opencode2` (spike S6).
 ## Key Design Decisions
 
 - No tool executor ever throws.
+- A member session is locked out of the engine twice. The context hook deletes
+  `MEMBER_TOOLS` from the request, which core enforces on the direct path, and every one of
+  those tools that this plugin owns refuses a member in its executor, which is the only lock
+  under Code Mode. There is no `tool.execute.before` guard, because a rejection there is a
+  defect that fails every unsettled tool call of the step.
 - The config never throws. A typo cannot stop the plugin from loading.
 - A spec is normalized once, at the edge. Every other module reads the normalized shape.
 - A run is detached. `workflow_run` returns a run id, and the lead reads the final report
@@ -328,7 +342,7 @@ env -C /tmp/wfdemo PWD=/tmp/wfdemo nohup \
 # 2. Drive it. PWD has to be set: the CLI reads it, not the working directory.
 env -C /tmp/wfdemo PWD=/tmp/wfdemo opencode2 run --server http://127.0.0.1:4599 \
   --auto --format json --print-logs --log-level info --title smoke \
-  'Call workflow_run_saved with name "chain". Then reply with the runId and nothing else.'
+  'Call the execute tool with exactly this code: const r = await tools.workflow_run_saved({ name: "chain" }); return r; Then reply with r.runId and nothing else.'
 
 # 3. Read the run record while it goes, and the lead transcript after.
 cat /tmp/wfdemo/.opencode/workflows/runs/<runId>.json
@@ -339,6 +353,8 @@ Notes that cost time to learn:
 - `--print-logs` to a file. Without it a run can end with no output at all.
 - macOS has no `timeout`. Background the run and use a `sleep`-and-`kill` watchdog.
 - Wait about 3 seconds between runs.
+- The lead runs under Code Mode, so a prompt that names a tool directly gets "Unknown tool"
+  and the model may give up. Ask for `execute` with `tools.<name>(...)`.
 - Do not open the TUI for a smoke test.
 
 ## Git

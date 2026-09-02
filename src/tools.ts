@@ -111,8 +111,9 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
 
   /**
    * A member session is a task of a run. It may not drive the engine that started it.
-   * The context hook already removes these tools from a member's request; this is the
-   * second lock, for the case where the hook did not run.
+   * This is the only lock under Code Mode, where the tool namespace comes from the registry
+   * and the context hook's deletion does not reach it, and the backup for the direct path.
+   * Every tool of `MEMBER_TOOLS` this plugin owns calls it first, and a test walks that list.
    */
   const denyMember = async (context: Caller, action: string, instead: string): Promise<Result | undefined> => {
     const member = await deps.roster.resolveMember(context.sessionID).catch(() => undefined)
@@ -342,7 +343,13 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       ].join("\n"),
       input: z.object({}),
       output: Outcome,
-      execute: guarded(async () => {
+      execute: guarded(async (_input, context) => {
+        const denied = await denyMember(
+          context,
+          "check the engine",
+          "Reply with your result; the lead reads the report.",
+        )
+        if (denied) return denied
         const doctor = await diagnose(deps)
         return { content: renderDoctor(doctor), output: { ok: true, doctor } }
       }),
@@ -393,6 +400,8 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       }),
       output: Outcome,
       execute: guarded(async (input, context) => {
+        const denied = await denyMember(context, "steer a member", "Use team_send to reach the lead.")
+        if (denied) return denied
         const steered = await deps.mailbox.steer({ ...input, sessionID: context.sessionID })
         if (!steered.ok) return fail(steered.error)
         const { mail, delivered, interrupted } = steered.value
@@ -417,6 +426,8 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       input: z.object({ runId: z.string().optional() }),
       output: Outcome,
       execute: guarded(async (input, context) => {
+        const denied = await denyMember(context, "read the mail of a run", "Use team_send to reach the lead.")
+        if (denied) return denied
         const read = await deps.mailbox.inbox({ runId: input.runId, sessionID: context.sessionID })
         if (!read.ok) return fail(read.error)
         const { mail, roster, run } = read.value

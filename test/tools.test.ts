@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { resolveConfig } from "../src/config.js"
+import { MEMBER_TOOLS } from "../src/hooks.js"
 import { wrapUntrusted } from "../src/report.js"
 import { type ToolDeps, workflowTools } from "../src/tools.js"
 import { LEAD, startPlugin, tick, waitForSpawn } from "./fake.js"
@@ -28,6 +29,7 @@ async function runDoctor(plugins: (() => Promise<unknown>) | undefined): Promise
     directory: "/project",
     spawner: { available: () => true },
     runs: { list: async () => [], prefix: () => "proj1" },
+    roster: { resolveMember: async () => undefined },
     plugins,
   } as unknown as ToolDeps)
   const doctor = tools.find((tool) => tool.name === "workflow_doctor")!
@@ -77,6 +79,28 @@ it("refuses run_saved, status, and cancel for a member session", async () => {
     const output = (await fake.run(name, input, { sessionID: MEMBER })).output as { ok: boolean; error: string }
     expect(output.ok, name).toBe(false)
     expect(output.error, name).toContain("workflow run")
+  }
+})
+
+it("refuses every tool a member may not call", async () => {
+  const fake = await startPlugin()
+  const runId = await withMember(fake)
+  for (const name of MEMBER_TOOLS) {
+    if (name === "subagent") continue
+    const output = (await fake.run(name, {}, { sessionID: MEMBER })).output as { ok: boolean; error: string }
+    expect(output.ok, name).toBe(false)
+    expect(output.error, name).toContain('task "a"')
+    expect(output.error, name).toContain(runId)
+  }
+})
+
+it("tells a member to use team_send instead of the mailbox tools of the lead", async () => {
+  const fake = await startPlugin()
+  await withMember(fake)
+  for (const name of ["team_steer", "team_inbox"] as const) {
+    const output = (await fake.run(name, {}, { sessionID: MEMBER })).output as { ok: boolean; error: string }
+    expect(output.error, name).toContain("team_send")
+    expect(output.error, name).not.toContain("leads no workflow run")
   }
 })
 
