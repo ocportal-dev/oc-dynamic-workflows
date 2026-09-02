@@ -25,6 +25,7 @@ the plugin package uses, so a schema is accepted as a `Tool.Info` input.
 npm install          # Install dependencies
 npm run build        # Compile TypeScript (tsc) to dist/
 npm run typecheck    # Type-check sources and tests (tsc --noEmit -p tsconfig.test.json)
+npm run schema       # Regenerate assets/workflow.schema.json (bun scripts/schema.ts)
 bun test             # Run the test suite
 ```
 
@@ -58,6 +59,10 @@ publish date. Install with `npm install --min-release-age=0`.
 - **`src/engine.ts`** — `attach(prefix, build)` / `detach(prefix)`: the module-level, refcounted
   map of the one engine every plugin instance of a project shares, keyed by the storage prefix.
 - **`src/spec-store.ts`** — Reads and writes `<directory>/.opencode/workflows/<name>.json`.
+- **`scripts/schema.ts`** — Generates `assets/workflow.schema.json` from `WorkflowObject` with
+  `z.toJSONSchema` (`target: "draft-7"`, `io: "input"`). Run with `npm run schema`.
+- **`assets/workflow.schema.json`** — The generated JSON Schema an editor points at. Committed,
+  never hand-edited.
 - **`src/persistence.ts`** — `RunStore`: run records in `ctx.storage`, keyed by project, plus
   a JSON mirror under `.opencode/workflows/runs/`. Keeps the live record in memory so the
   runner and the event consumer mutate one object.
@@ -287,6 +292,9 @@ live `opencode2` (spike S6).
   retry can fix it.
 - Saved workflow names are restricted to `[A-Za-z0-9._-]` and may not contain `..`, so a
   name cannot escape `.opencode/workflows/`.
+- `$schema` is accepted at the edge and dropped by the normalizer, so a saved spec can point
+  an editor at the schema and no spec ever carries the key onwards. The asset under `assets/`
+  is generated, never hand-edited, and `test/schema.test.ts` fails when it drifts.
 - `@opencode-ai/plugin` and `zod` are pinned to exact versions and declared as runtime
   dependencies.
 

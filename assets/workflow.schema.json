@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/velazcod/oc-dynamic-workflows/assets/workflow.schema.json",
+  "title": "opencode dynamic workflow spec",
+  "description": "A spec is JSON with \"specVersion\": 1, \"name\", \"goal\", and \"phases\".\nA phase has \"id\", \"strategy\" (\"sequential\", \"parallel\", or \"team\"), \"tasks\", and an optional \"synthesisPrompt\".\nA task has \"id\", \"kind\" (\"agent\" with a \"prompt\", or \"shell\" with a \"command\"), and optional \"agent\", \"retries\" (0-3), \"timeoutMs\", \"outputSchema\", \"isolation\", and \"keep\".\nSet the model on the agent: \"model\" on a task is rejected.\n\"isolation\": \"worktree\" runs the task in its own git worktree of HEAD; edits are saved as a patch and the worktree is removed unless \"keep\": true.\nA \"team\" phase runs like \"parallel\" and opens the mailbox: its members use team_send, and you use team_steer and team_inbox.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "specVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "usd": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1000
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 50000000
+        }
+      },
+      "additionalProperties": false
+    },
+    "phases": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "strategy": {
+            "default": "parallel",
+            "type": "string",
+            "enum": [
+              "sequential",
+              "parallel",
+              "team"
+            ]
+          },
+          "tasks": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string"
+                },
+                "kind": {
+                  "default": "agent",
+                  "type": "string",
+                  "enum": [
+                    "agent",
+                    "shell"
+                  ]
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "command": {
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "retries": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 5000,
+                  "maximum": 1800000
+                },
+                "isolation": {
+                  "type": "string",
+                  "const": "worktree"
+                },
+                "keep": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "outputSchema": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "synthesisPrompt": {
+            "type": "string"
+          },
+          "mailbox": {
+            "type": "object",
+            "properties": {
+              "peers": {
+                "default": false,
+                "type": "boolean",
+                "const": false
+              },
+              "maxMessages": {
+                "default": 20,
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "tasks"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "specVersion",
+    "name",
+    "goal",
+    "phases"
+  ],
+  "additionalProperties": false
+}

@@ -14,9 +14,10 @@
   ],
   "scripts": {
     "build": "tsc",
+    "schema": "bun scripts/schema.ts",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "bun test",
-    "prepack": "npm run build"
+    "prepack": "npm run schema && npm run build"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,6 +28,7 @@
     }
   },
   "files": [
+    "assets",
     "dist",
     "README.md"
   ],

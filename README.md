@@ -140,6 +140,43 @@ A spec is JSON. `specVersion` must be `1`.
 }
 ```
 
+### Editor validation
+
+The package ships a JSON Schema for a saved spec, so an editor reports a missing field, a
+bad value, and an unknown key while you type.
+
+- Installed from npm: `node_modules/opencode-dynamic-workflows/assets/workflow.schema.json`.
+- Configured by path: `<plugin directory>/assets/workflow.schema.json`.
+
+Put a `"$schema"` line at the top of the file. The path is relative to the spec, which lives
+in `<project>/.opencode/workflows/`:
+
+```json
+{
+  "$schema": "../../node_modules/opencode-dynamic-workflows/assets/workflow.schema.json",
+  "specVersion": 1,
+  "name": "survey",
+  "goal": "Survey the three client apps and compare them.",
+  "phases": []
+}
+```
+
+The plugin drops the `"$schema"` key before it checks the spec and never writes it back.
+
+The schema covers the shape of one field at a time. It does not carry the rules that read
+more than one field, which the plugin reports when the spec is run:
+
+- Task ids are unique across the whole workflow.
+- `prompt` is required for an `agent` task, `command` for a `shell` one.
+- `keep` needs `isolation: "worktree"`.
+- `mailbox` is only allowed on a `team` phase.
+- `budget` needs `usd`, `tokens`, or both.
+- `task.model` is rejected in version 1.
+- The task count and the `shellTasks` and `worktrees` switches come from the plugin options.
+
+The `name` and `type` aliases are resolved before the check, so the schema does not list
+them: an editor flags them as unknown keys even though the plugin accepts them.
+
 ### Fields
 
 | Field | Where | Notes |

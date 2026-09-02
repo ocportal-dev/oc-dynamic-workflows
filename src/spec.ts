@@ -58,7 +58,13 @@ const Phase = z.strictObject({
   mailbox: Mailbox.optional(),
 })
 
-const Workflow = z.strictObject({
+/**
+ * The base object, exported so `scripts/schema.ts` can generate the JSON Schema asset.
+ * `workflowSchema` wraps it with the cross-field rules, which JSON Schema cannot carry.
+ */
+export const WorkflowObject = z.strictObject({
+  /** Accepted so an editor can validate a saved spec, and dropped by `normalize`. */
+  $schema: z.string().optional(),
   specVersion: z.literal(1),
   name: z.string().min(1),
   goal: z.string().min(1),
@@ -68,7 +74,7 @@ const Workflow = z.strictObject({
 
 /** The schema depends on the resolved options, so it is built per call. */
 function workflowSchema(limits: SpecLimits) {
-  return Workflow.superRefine((workflow, ctx) => {
+  return WorkflowObject.superRefine((workflow, ctx) => {
     const seen = new Map<string, string>()
     let total = 0
 
@@ -161,7 +167,10 @@ export function parseSpec(input: unknown, limits: SpecLimits): ParseResult {
   return { ok: true, spec: result.data }
 }
 
-/** Accepts the aliases `name` (for `id`) and `type` (for `strategy`) before the parse. */
+/**
+ * Accepts the aliases `name` (for `id`) and `type` (for `strategy`) before the parse, and
+ * drops `$schema`, so the parsed spec never carries the editor hint.
+ */
 function normalize(workflow: Record<string, unknown>): Record<string, unknown> {
   const phases = Array.isArray(workflow.phases)
     ? workflow.phases.map((phase) => {
@@ -173,7 +182,8 @@ function normalize(workflow: Record<string, unknown>): Record<string, unknown> {
         return next
       })
     : workflow.phases
-  return { ...workflow, phases }
+  const { $schema: _editorHint, ...rest } = workflow
+  return { ...rest, phases }
 }
 
 /** Copies `from` to `to` when `to` is absent, and drops the alias key either way. */
