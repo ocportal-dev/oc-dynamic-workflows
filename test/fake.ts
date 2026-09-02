@@ -1,4 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { mkdtemp, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { resolveConfig, type WorkflowConfig } from "../src/config.js"
 import { resetEngines } from "../src/engine.js"
 import { consumeEvents } from "../src/events.js"
@@ -600,4 +603,24 @@ export async function waitForSpawn(world: World, count: number): Promise<FakeSpa
     await tick(1)
   }
   throw new Error(`spawn ${count} never happened (${world.spawns.length} so far)`)
+}
+
+/**
+ * A repository with one commit, which is what a worktree of HEAD needs. The directory it
+ * makes is pushed onto `made`, so the caller's cleanup removes it.
+ */
+export async function repository(made: string[], prefix = "wf-home-"): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), prefix))
+  made.push(home)
+  for (const args of [
+    ["init", "-q", "-b", "main"],
+    ["config", "user.email", "test@example.com"],
+    ["config", "user.name", "Test"],
+  ]) {
+    await Bun.spawn(["git", ...args], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
+  }
+  await writeFile(join(home, "kept.txt"), "one\n", "utf8")
+  await Bun.spawn(["git", "add", "-A"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
+  await Bun.spawn(["git", "commit", "-q", "-m", "first"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
+  return home
 }

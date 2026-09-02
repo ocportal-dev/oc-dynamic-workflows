@@ -1,10 +1,9 @@
 import { afterEach, expect, it } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { RunRecord, TaskSpec, WorkflowSpec } from "../src/types.js"
 import { create, exists, patchPath, worktreePath } from "../src/worktree.js"
-import { LEAD, LEAD_AGENT, PROJECT, startRunner, tick, until, waitForSpawn } from "./fake.js"
+import { LEAD, LEAD_AGENT, PROJECT, repository, startRunner, tick, until, waitForSpawn } from "./fake.js"
 
 const START = { lead: LEAD, leadAgent: LEAD_AGENT }
 const WARMUP = "Reply with the single word ready and call no tools."
@@ -27,29 +26,12 @@ function spec(task: Partial<TaskSpec>): WorkflowSpec {
   }
 }
 
-/** A repository with one commit, which is what a worktree of HEAD needs. */
-async function repository(): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), "wf-home-"))
-  made.push(home)
-  for (const args of [
-    ["init", "-q", "-b", "main"],
-    ["config", "user.email", "test@example.com"],
-    ["config", "user.name", "Test"],
-  ]) {
-    await Bun.spawn(["git", ...args], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  }
-  await writeFile(join(home, "kept.txt"), "one\n", "utf8")
-  await Bun.spawn(["git", "add", "-A"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  await Bun.spawn(["git", "commit", "-q", "-m", "first"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  return home
-}
-
 afterEach(async () => {
   for (const directory of made.splice(0)) await rm(directory, { recursive: true, force: true })
 })
 
 it("warms the member up, moves it while it is idle, then gives it the task", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(spec({}), START)
   const warm = await waitForSpawn(fake, 1)
@@ -91,7 +73,7 @@ it("warms the member up, moves it while it is idle, then gives it the task", asy
 })
 
 it("fails the attempt when the warm-up does not answer, and retries with a fresh worktree", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(spec({ retries: 1 }), START)
   const first = await waitForSpawn(fake, 1)
@@ -119,7 +101,7 @@ it("fails the attempt when the warm-up does not answer, and retries with a fresh
 })
 
 it("fails the attempt when the member never arrives, and interrupts nothing", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home, moveTimeoutMs: 30 })
   const runId = await fake.runner.start(spec({}), START)
   const warm = await waitForSpawn(fake, 1)
@@ -139,7 +121,7 @@ it("fails the attempt when the member never arrives, and interrupts nothing", as
 })
 
 it("fails the attempt when the move itself is refused", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(spec({}), START)
   const warm = await waitForSpawn(fake, 1)
@@ -157,7 +139,7 @@ it("fails the attempt when the move itself is refused", async () => {
 })
 
 it("ends the wait for the move when the run is cancelled", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home, moveTimeoutMs: 20_000 })
   const runId = await fake.runner.start(spec({}), START)
   const warm = await waitForSpawn(fake, 1)
@@ -178,7 +160,7 @@ it("ends the wait for the move when the run is cancelled", async () => {
 })
 
 it("removes the worktree of a task that runs out of time", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(spec({ timeoutMs: 300 }), START)
   const warm = await waitForSpawn(fake, 1)
@@ -198,7 +180,7 @@ it("removes the worktree of a task that runs out of time", async () => {
 })
 
 it("runs an isolated shell task in its worktree and moves no session", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(
     spec({ kind: "shell", command: "echo hi > made.txt", prompt: undefined }),
@@ -218,7 +200,7 @@ it("runs an isolated shell task in its worktree and moves no session", async () 
 })
 
 it("gives a retry a fresh worktree and overwrites the patch", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(spec({ retries: 1 }), START)
   const path = worktreePath(home, runId, "a")
@@ -251,7 +233,7 @@ it("gives a retry a fresh worktree and overwrites the patch", async () => {
 })
 
 it("settles the worktree a restart left behind", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const created = await create({ home, runId: "wf_orphan", taskId: "a" })
   if (!created.ok) throw new Error(created.error)
@@ -338,7 +320,7 @@ async function runFirst(
 }
 
 it("gives the next task of a sequential phase the patch of an earlier worktree task", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(handOff({}), START)
   const path = worktreePath(home, runId, "a")
@@ -359,7 +341,7 @@ it("gives the next task of a sequential phase the patch of an earlier worktree t
 })
 
 it("names the kept worktree of an earlier task as well as its patch", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(handOff({ keep: true }), START)
   const path = worktreePath(home, runId, "a")
@@ -375,7 +357,7 @@ it("names the kept worktree of an earlier task as well as its patch", async () =
 })
 
 it("says an earlier worktree task changed nothing when it left no patch", async () => {
-  const home = await repository()
+  const home = await repository(made)
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(handOff({}), START)
   await runFirst(fake, runId, worktreePath(home, runId, "a"))

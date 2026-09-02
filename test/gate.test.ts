@@ -1,12 +1,11 @@
 import { afterEach, expect, it } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { renderFinalReport } from "../src/report.js"
 import { GATE_SCHEMA } from "../src/spec.js"
 import { patchPath, worktreePath } from "../src/worktree.js"
 import type { WorkflowSpec } from "../src/types.js"
-import { LEAD, LEAD_AGENT, startRunner, until, waitForSpawn } from "./fake.js"
+import { LEAD, LEAD_AGENT, repository, startRunner, until, waitForSpawn } from "./fake.js"
 
 const START = { lead: LEAD, leadAgent: LEAD_AGENT }
 const WARMUP = "Reply with the single word ready and call no tools."
@@ -45,23 +44,6 @@ function gated(maxRounds = 3, worktree = false): WorkflowSpec {
       },
     ],
   }
-}
-
-/** A repository with one commit, which is what a worktree of HEAD needs. */
-async function repository(): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), "wf-gate-"))
-  made.push(home)
-  for (const args of [
-    ["init", "-q", "-b", "main"],
-    ["config", "user.email", "test@example.com"],
-    ["config", "user.name", "Test"],
-  ]) {
-    await Bun.spawn(["git", ...args], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  }
-  await writeFile(join(home, "kept.txt"), "one\n", "utf8")
-  await Bun.spawn(["git", "add", "-A"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  await Bun.spawn(["git", "commit", "-q", "-m", "first"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  return home
 }
 
 afterEach(async () => {
@@ -185,7 +167,7 @@ it("lets the budget stop the next round and names the cap", async () => {
 })
 
 it("tells a worktree task of the next round to apply the patch of the last one", async () => {
-  const home = await repository()
+  const home = await repository(made, "wf-gate-")
   const fake = startRunner({ directory: home })
   const runId = await fake.runner.start(gated(3, true), START)
   const path = worktreePath(home, runId, "impl")

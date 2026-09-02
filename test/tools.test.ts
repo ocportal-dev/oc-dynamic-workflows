@@ -8,7 +8,7 @@ import { wrapUntrusted } from "../src/report.js"
 import { save } from "../src/spec-store.js"
 import { type ToolDeps, workflowTools } from "../src/tools.js"
 import type { WorkflowSpec } from "../src/types.js"
-import { LEAD, startPlugin, tick, waitForSpawn } from "./fake.js"
+import { LEAD, repository, startPlugin, tick, waitForSpawn } from "./fake.js"
 
 /** One team phase with one task, so the run spawns exactly one child session. */
 const SPEC = {
@@ -501,25 +501,8 @@ afterEach(async () => {
   for (const directory of made.splice(0)) await rm(directory, { recursive: true, force: true })
 })
 
-/** A repository with one commit, which is what the worktree task of a build template needs. */
-async function repository(): Promise<string> {
-  const home = await mkdtemp(join(tmpdir(), "wf-builtin-"))
-  made.push(home)
-  for (const args of [
-    ["init", "-q", "-b", "main"],
-    ["config", "user.email", "test@example.com"],
-    ["config", "user.name", "Test"],
-  ]) {
-    await Bun.spawn(["git", ...args], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  }
-  await writeFile(join(home, "kept.txt"), "one\n", "utf8")
-  await Bun.spawn(["git", "add", "-A"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  await Bun.spawn(["git", "commit", "-q", "-m", "first"], { cwd: home, stdout: "pipe", stderr: "pipe" }).exited
-  return home
-}
-
 it("runs a built-in workflow under the goal the caller passes", async () => {
-  const home = await repository()
+  const home = await repository(made, "wf-builtin-")
   const fake = await startPlugin({ directory: home })
 
   const goal = "Add a --json flag to the CLI."
