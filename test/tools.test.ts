@@ -250,3 +250,11 @@ it("fills in the specVersion of a saved spec", async () => {
   expect((result.output as { warnings: string[] }).warnings).toEqual(["specVersion: missing, set to 1"])
   expect(result.content).toContain("filled in 1 missing field:")
 })
+
+it("asks the server once for a lead that calls a tool again and again", async () => {
+  const fake = await startPlugin()
+
+  for (let call = 0; call < 5; call += 1) await fake.run("workflow_status", {})
+  // Every executor asks the roster whether the caller is a member. Only the first call pays.
+  expect(fake.gets.filter((id) => id === LEAD)).toHaveLength(1)
+})

@@ -482,7 +482,8 @@ export function startRunner(
   const world = makeWorld()
   const config = { ...resolveConfig(options.options ?? {}).config, ...options.config }
   const store = new RunStore(world.storageDomain, PROJECT)
-  const roster = new Roster(async (sessionID) => world.sessions.get(sessionID))
+  // The same lookup the plugin builds, so a test can count it through `gets`.
+  const roster = new Roster(async (sessionID) => world.session.get({ sessionID }), { now: options.now })
   const spawner = new Spawner({ interrupt: (sessionID) => world.session.interrupt({ sessionID }) })
   spawner.capture(world.subagent)
   const mailbox = new Mailbox({

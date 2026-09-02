@@ -70,7 +70,8 @@ publish date. Install with `npm install --min-release-age=0`.
 - **`src/spawner.ts`** — Holds the captured `subagent` executor and calls it with a forged
   tool context. The only module that touches those internals.
 - **`src/roster.ts`** — Maps run to lead and task to child session. Fills from
-  `session.created` and falls back to `ctx.session.get`.
+  `session.created` and falls back to `ctx.session.get`. A lookup that finds no member is
+  remembered for 10 seconds; `session.created`, `bind`, and `registerLead` clear it.
 - **`src/events.ts`** — The `ctx.event.subscribe` loop. Routes `session.created`,
   `session.usage.updated`, `session.execution.failed`, `session.inbox.delivered`,
   `permission.asked`, and `permission.replied`. Resubscribes with a backoff.
@@ -289,6 +290,10 @@ live `opencode2` (spike S6).
   task through the same executor with `sessionID` set. Nothing is interrupted on that path; a
   warm-up or a move that does not come back fails the attempt, and a retry gets a new session
   and a fresh worktree.
+- `Roster.resolveMember` caches a miss for 10 seconds, because the context hook calls it on
+  every model request of every session that leads no run. `observeCreated` and `bind` drop the
+  miss of that session, and `registerLead` drops every miss, because a miss can be a child
+  whose parent was not a lead yet. The TTL is internal, not a plugin option.
 - A task with an `outputSchema` has to answer with JSON. A miss is a failed attempt, so a
   retry can fix it.
 - Saved workflow names are restricted to `[A-Za-z0-9._-]` and may not contain `..`, so a

@@ -47,14 +47,22 @@ export class Roster {
   #children = new Map<string, string>()
   /** spawn description → the waiter that `expect` is holding. */
   #waiting = new Map<string, (sessionID: string) => void>()
+  /** session id → the time its miss expires. A session with no run costs one lookup per interval. */
+  #misses = new Map<string, number>()
   #lookup: SessionLookup
+  #missTtlMs: number
+  #now: () => number
 
-  constructor(lookup: SessionLookup) {
+  constructor(lookup: SessionLookup, options: { missTtlMs?: number; now?: () => number } = {}) {
     this.#lookup = lookup
+    this.#missTtlMs = options.missTtlMs ?? 10_000
+    this.#now = options.now ?? Date.now
   }
 
   registerLead(runId: string, leadSessionID: string): void {
     this.#leads.set(leadSessionID, runId)
+    // A miss can be a child whose parent was not a lead yet, and a resume re-homes the lead.
+    this.#misses.clear()
   }
 
   /** The run a lead session started, or nothing when it leads none. */
@@ -81,6 +89,7 @@ export class Roster {
     const parsed = parseDescription(event.title)
     if (!parsed) return
     this.#children.set(event.title, event.sessionID)
+    this.#misses.delete(event.sessionID)
     this.#members.set(event.sessionID, { ...parsed, sessionID: event.sessionID })
     const waiter = this.#waiting.get(event.title)
     if (waiter) {
@@ -91,6 +100,7 @@ export class Roster {
 
   /** Records a child the executor reported but no event announced. */
   bind(runId: string, taskId: string, sessionID: string): void {
+    this.#misses.delete(sessionID)
     this.#members.set(sessionID, { runId, taskId, sessionID })
   }
 
@@ -98,14 +108,25 @@ export class Roster {
     return this.#members.get(sessionID)
   }
 
-  /** The same lookup, but it asks the server when memory has no answer. */
+  /**
+   * The same lookup, but it asks the server when memory has no answer.
+   *
+   * A miss is remembered for `missTtlMs`, because the context hook calls this on every
+   * model request of every session. A lookup that failed while the server was busy is
+   * therefore answered again once that time has passed.
+   */
   async resolveMember(sessionID: string): Promise<Member | undefined> {
     const known = this.#members.get(sessionID)
     if (known) return known
+    const expires = this.#misses.get(sessionID)
+    if (expires !== undefined && expires > this.#now()) return undefined
     const info = await this.#lookup(sessionID).catch(() => undefined)
-    if (!info?.parentID || !this.#leads.has(info.parentID)) return undefined
-    const parsed = parseDescription(info.title)
-    if (!parsed) return undefined
+    const parsed = info?.parentID && this.#leads.has(info.parentID) ? parseDescription(info.title) : undefined
+    if (!parsed) {
+      this.#misses.set(sessionID, this.#now() + this.#missTtlMs)
+      return undefined
+    }
+    this.#misses.delete(sessionID)
     const member = { ...parsed, sessionID }
     this.#members.set(sessionID, member)
     return member
