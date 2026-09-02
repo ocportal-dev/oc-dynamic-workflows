@@ -1,0 +1,33 @@
+{
+  "specVersion": 1,
+  "name": "build-review",
+  "goal": "Add the flag and have it reviewed.",
+  "phases": [
+    {
+      "id": "build",
+      "strategy": "sequential",
+      "repeat": { "gate": "review", "maxRounds": 3 },
+      "tasks": [
+        {
+          "id": "impl",
+          "prompt": "Implement the goal. Reply with what you changed and how you verified it.",
+          "isolation": "worktree",
+          "retries": 1
+        },
+        {
+          "id": "review",
+          "agent": "reviewer",
+          "prompt": "Review the patch of task impl against the goal. Reply with one JSON object.",
+          "outputSchema": {
+            "type": "object",
+            "required": ["approved"],
+            "properties": {
+              "approved": { "type": "boolean" },
+              "findings": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

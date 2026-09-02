@@ -1,5 +1,5 @@
 import { budgetExceeded, overrideFor } from "./budget.js"
-import type { WorkflowConfig } from "./config.js"
+import type { ModelRef, WorkflowConfig } from "./config.js"
 import { countTokens } from "./events.js"
 import { swallow } from "./log.js"
 import type { Mailbox } from "./mailbox.js"
@@ -11,7 +11,16 @@ import { type ShellHandle, startShell } from "./shell.js"
 import { parseSpec } from "./spec.js"
 import type { Spawner } from "./spawner.js"
 import * as worktree from "./worktree.js"
-import type { PhaseRecord, PhaseSpec, RunRecord, TaskRecord, TaskSpec, WorkflowSpec } from "./types.js"
+import type {
+  PhaseRecord,
+  PhaseSpec,
+  RepeatSpec,
+  RoundRecord,
+  RunRecord,
+  TaskRecord,
+  TaskSpec,
+  WorkflowSpec,
+} from "./types.js"
 
 /** `ctx.session`, reduced to the calls the runner makes. */
 export interface RunnerSession {
@@ -41,7 +50,7 @@ export interface RunnerDeps {
   /** The run ids this process has a loop for. Shared by every instance of the engine. */
   activeRuns?: Set<string>
   /** `ctx.generate.text`. Without it a phase cannot be synthesised. */
-  generate?: (input: { prompt: string }) => Promise<{ text: string }>
+  generate?: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }>
   /** The clock the run limit reads. A test can move it. */
   now?: () => number
   /** How often a backgrounded member is asked whether it finished. */
@@ -91,6 +100,8 @@ const MOVE_TIMEOUT_MS = 60_000
 const CANCEL_WAIT_MS = 15_000
 /** One guidance text of a resume. It lands in a member prompt, so it is capped like mail. */
 const GUIDANCE_LIMIT = 2000
+/** One finding of a gate. It is kept on the record and read by the next round. */
+const FINDING_LIMIT = 1000
 
 /**
  * A task that is in flight, so a cancel, a budget stop, or the run clock can end it.
@@ -477,8 +488,7 @@ export class Runner {
       // lead while it works and the lead can steer it back.
       if (phase.strategy === "team") await this.#deps.mailbox?.open(run, spec)
       try {
-        if (phase.strategy === "sequential") await this.#sequentialPhase(run, phase, spec, messageID, deadline)
-        else await this.#parallelPhase(run, phase, spec, messageID, deadline)
+        await this.#runPhase(run, phase, spec, messageID, deadline)
       } finally {
         if (phase.strategy === "team") await this.#deps.mailbox?.close(run.runId).catch(() => {})
       }
@@ -495,6 +505,74 @@ export class Runner {
 
     this.#skipRemaining(run)
     await this.#finish(run)
+  }
+
+  /** The strategy of the phase, plus the gate loop a `sequential` phase can carry. */
+  async #runPhase(
+    run: RunRecord,
+    phase: PhaseRecord,
+    spec: PhaseSpec,
+    messageID: string | undefined,
+    deadline: number,
+  ): Promise<void> {
+    if (phase.strategy !== "sequential") return this.#parallelPhase(run, phase, spec, messageID, deadline)
+    if (!spec.repeat) return this.#sequentialPhase(run, phase, spec, messageID, deadline)
+    return this.#repeatPhase(run, phase, spec, spec.repeat, messageID, deadline)
+  }
+
+  /**
+   * Runs a phase again until its gate approves the round.
+   *
+   * The gate is the last task of the phase and answers with `approved`. A round the gate
+   * refuses resets every task of the phase and runs it again with the findings in the
+   * prompt. The loop ends when the gate approves, when it does not complete, at
+   * `maxRounds`, and when the run is cancelled, out of time, or out of budget.
+   */
+  async #repeatPhase(
+    run: RunRecord,
+    phase: PhaseRecord,
+    spec: PhaseSpec,
+    repeat: RepeatSpec,
+    messageID: string | undefined,
+    deadline: number,
+  ): Promise<void> {
+    phase.round ??= 1
+    while (true) {
+      await this.#sequentialPhase(run, phase, spec, messageID, deadline)
+      const gate = phase.tasks.find((task) => task.taskId === repeat.gate)
+      const verdict = readVerdict(gate)
+      recordRound(phase, verdict)
+      await this.#deps.store.put(run)
+
+      if (verdict.approved === true || gate?.status !== "completed") return
+      if (phase.round >= repeat.maxRounds) return
+      // A cancel that lands between two rounds ends the loop with the round it recorded.
+      if (this.#halted(run.runId)) return
+      if (await this.#outOfTime(run, deadline)) return
+      if (await this.#roundBudget(run)) return
+
+      phase.round += 1
+      resetRound(phase)
+      await this.#deps.store.put(run)
+    }
+  }
+
+  /**
+   * The budget between two rounds.
+   *
+   * Nothing is pending or running there, so `#overBudget` finds nothing to stop and lets
+   * the run pass. The cap is read here instead: past it no new round starts, the rest of
+   * the run is skipped, and the run ends `partial` with the cap named.
+   */
+  async #roundBudget(run: RunRecord): Promise<boolean> {
+    if (this.#overspent.has(run.runId)) return true
+    const stop = budgetExceeded(run)
+    if (!stop) return false
+    this.#overspent.add(run.runId)
+    run.error = stop.message
+    this.#skipRemaining(run)
+    await this.#deps.store.put(run)
+    return true
   }
 
   /** Tasks in order. The first task that does not complete stops the phase. */
@@ -565,7 +643,9 @@ export class Runner {
       ...outputs.map((task) => wrapUntrusted(task.kind, task.taskId, clip(task.output ?? "", CONTEXT_LIMIT))),
     ].join("\n\n")
     try {
-      const { text } = await generate({ prompt })
+      // The key is left out without a model, so the catalog default is used.
+      const model = this.#deps.config.synthesisModel
+      const { text } = await generate(model ? { prompt, model } : { prompt })
       // An empty summary must not travel to the next phase as if it said something.
       phase.synthesis = text.trim()
         ? { status: "completed", output: text }
@@ -704,7 +784,7 @@ export class Runner {
       const outcome =
         spec.kind === "shell"
           ? await this.#shellTask(run, spec, task, isolated)
-          : await this.#agentTask(run, phase, spec, task, attempt, messageID, isolated)
+          : await this.#agentTask(run, phase, phaseSpec, spec, task, attempt, messageID, isolated)
 
       task.status = this.#halted(run.runId) && outcome !== "completed" ? "cancelled" : outcome
       task.endedAt = new Date().toISOString()
@@ -804,6 +884,7 @@ export class Runner {
   async #agentTask(
     run: RunRecord,
     phase: PhaseRecord,
+    phaseSpec: PhaseSpec,
     spec: TaskSpec,
     task: TaskRecord,
     attempt: number,
@@ -837,7 +918,7 @@ export class Runner {
       messageID,
       agent: spec.agent ?? this.#deps.config.defaultAgent,
       description,
-      prompt: buildPrompt(run, phase, spec, task.guidance, isolated),
+      prompt: buildPrompt(run, phase, phaseSpec, spec, task.guidance, isolated),
       sessionID: moved,
     })
     live.cancel = handle.cancel
@@ -1144,6 +1225,50 @@ function isTextPart(part: unknown): boolean {
   return candidate?.type === "text" && typeof candidate.text === "string"
 }
 
+/** What the gate of a `repeat` phase said about the round it closed. */
+interface Verdict {
+  /** Absent when the gate did not complete, so nothing was judged. */
+  approved?: boolean
+  findings: string[]
+}
+
+/**
+ * Reads the verdict out of the gate's JSON answer.
+ *
+ * `outputSchema` already checked the shape, so this only takes what it can use: a
+ * reviewer answers with `findings`, a stakeholder with `gaps`, and each line is clipped
+ * because it travels into the prompt of the next round.
+ */
+function readVerdict(gate: TaskRecord | undefined): Verdict {
+  const data = gate?.status === "completed" ? gate.data : undefined
+  const approved = typeof data?.approved === "boolean" ? data.approved : undefined
+  const listed = Array.isArray(data?.findings) ? data.findings : Array.isArray(data?.gaps) ? data.gaps : []
+  const findings = listed
+    .filter((finding): finding is string => typeof finding === "string")
+    .map((finding) => clip(finding, FINDING_LIMIT))
+  return { approved, findings }
+}
+
+/** One entry per finished round. A round that was run again replaces its entry. */
+function recordRound(phase: PhaseRecord, verdict: Verdict): void {
+  const record: RoundRecord = {
+    round: phase.round ?? 1,
+    approved: verdict.approved,
+    findings: verdict.findings,
+    tasks: phase.tasks.map((task) => ({
+      taskId: task.taskId,
+      status: task.status,
+      attempts: task.attempts,
+      patch: task.worktree?.patch,
+      usage: { ...task.usage },
+    })),
+  }
+  const rounds = (phase.rounds ??= [])
+  const index = rounds.findIndex((entry) => entry.round === record.round)
+  if (index >= 0) rounds[index] = record
+  else rounds.push(record)
+}
+
 /** `completed` when every task did, `failed` when none did, `partial` in between. */
 function phaseStatus(phase: PhaseRecord): PhaseRecord["status"] {
   const completed = phase.tasks.filter((task) => task.status === "completed").length
@@ -1179,6 +1304,7 @@ async function race<T>(promise: Promise<T>, timeoutMs: number | undefined): Prom
 export function buildPrompt(
   run: RunRecord,
   phase: PhaseRecord,
+  phaseSpec: PhaseSpec,
   task: TaskSpec,
   guidance?: string,
   worktreePath?: string,
@@ -1204,12 +1330,52 @@ export function buildPrompt(
         parts.push(wrapUntrusted(candidate.kind, candidate.taskId, clip(candidate.output ?? "", CONTEXT_LIMIT)))
       }
     }
+
+    // The edits of an isolated task are not in this checkout, so the next task is given
+    // the patch it left instead: enough to read it or to `git apply --check` it.
+    const isolated = phase.tasks.flatMap((candidate) =>
+      candidate.status === "completed" && candidate.worktree ? [{ taskId: candidate.taskId, ...candidate.worktree }] : [],
+    )
+    if (isolated.length > 0) {
+      parts.push("Edits of the earlier worktree tasks of this phase, saved as patches:")
+      for (const found of isolated) {
+        const body = [found.patch ? `patch: ${found.patch}` : "no changes"]
+        if (found.kept) body.push(`worktree kept at: ${found.path}`)
+        if (found.stat) body.push(found.stat)
+        parts.push(wrapUntrusted("worktree", found.taskId, body.join("\n")))
+      }
+      parts.push("A task of this phase that is not listed above edited this checkout directly.")
+    }
   }
 
+  parts.push(...roundContext(phase, phaseSpec, task))
   parts.push(task.prompt ?? "")
   // The lead wrote it for this attempt, but it still travels as data, not as instructions.
   if (guidance) parts.push("Guidance from the lead for this attempt:", wrapUntrusted("lead", "guidance", guidance))
   return parts.join("\n\n")
+}
+
+/**
+ * What a task of the second or a later round of a `repeat` phase has to know.
+ *
+ * The tasks of the phase were reset, so nothing of the last round is in the record the
+ * prompt is built from any more; the findings of the gate and the patch the task itself
+ * left are what carry the work over.
+ */
+function roundContext(phase: PhaseRecord, phaseSpec: PhaseSpec, task: TaskSpec): string[] {
+  const repeat = phaseSpec.repeat
+  const round = phase.round ?? 1
+  if (!repeat || round < 2) return []
+  const previous = phase.rounds?.find((entry) => entry.round === round - 1)
+  const findings = previous?.findings.join("\n") || "The gate named no finding."
+  const parts = [
+    `Round ${round} of ${repeat.maxRounds}. The gate task did not approve round ${round - 1}. Address every finding:`,
+    wrapUntrusted("agent", repeat.gate, clip(findings, CONTEXT_LIMIT)),
+  ]
+  // A worktree of this round is a fresh one of HEAD, so the edits are only in the patch.
+  const patch = previous?.tasks.find((entry) => entry.taskId === task.id)?.patch
+  if (patch) parts.push(`Your edits of the last round are saved as a patch; apply it first: git apply ${patch}`)
+  return parts
 }
 
 /**
@@ -1249,28 +1415,58 @@ function markOrphaned(run: RunRecord, reason: string): void {
  * other task goes back to `pending` with its attempts reset. A phase whose tasks all
  * completed, and whose synthesis completed with them, is kept whole and skipped; any other
  * phase is run again, and its synthesis is dropped because it would summarise a part.
+ *
+ * A `repeat` phase is the exception: one whose last round was refused and that has rounds
+ * left is put back to the next round, because its work is not done either.
  */
 function resetForResume(run: RunRecord): void {
   for (const [index, phase] of run.phases.entries()) {
+    const spec = run.spec.phases[index]
     for (const task of phase.tasks) {
       if (task.status === "completed") continue
-      task.status = "pending"
-      task.attempts = 0
-      task.error = undefined
-      task.output = undefined
-      task.data = undefined
-      task.sessionID = undefined
-      task.startedAt = undefined
-      task.endedAt = undefined
-      // The task runs again, so it gets a new worktree; the completed ones keep theirs.
-      task.worktree = undefined
+      resetTask(task)
     }
-    const synthesised = run.spec.phases[index]?.synthesisPrompt === undefined || phase.synthesis?.status === "completed"
-    const whole = phase.tasks.every((task) => task.status === "completed") && synthesised
+    const done = phase.tasks.every((task) => task.status === "completed")
+    if (done && spec?.repeat && unapproved(phase, spec.repeat)) {
+      phase.round = (phase.round ?? 1) + 1
+      resetRound(phase)
+      phase.status = "pending"
+      phase.synthesis = undefined
+      phase.error = undefined
+      continue
+    }
+    const synthesised = spec?.synthesisPrompt === undefined || phase.synthesis?.status === "completed"
+    const whole = done && synthesised
     phase.status = whole ? "completed" : "pending"
     if (!whole) phase.synthesis = undefined
     phase.error = undefined
   }
+}
+
+/** Whether the last round of a repeat phase was refused and the phase has rounds left. */
+function unapproved(phase: PhaseRecord, repeat: RepeatSpec): boolean {
+  const last = phase.rounds?.at(-1)
+  if (!last || last.approved !== false) return false
+  return (phase.round ?? 1) < repeat.maxRounds
+}
+
+/** Every task of a repeat phase goes back to pending, so the next round runs them again. */
+function resetRound(phase: PhaseRecord): void {
+  for (const task of phase.tasks) resetTask(task)
+}
+
+/** Puts one task back to pending. Its usage stays, so the spend of the run carries over. */
+function resetTask(task: TaskRecord): void {
+  task.status = "pending"
+  task.attempts = 0
+  task.error = undefined
+  task.output = undefined
+  task.data = undefined
+  task.sessionID = undefined
+  task.startedAt = undefined
+  task.endedAt = undefined
+  // The task runs again, so it gets a new worktree; the completed ones keep theirs.
+  task.worktree = undefined
 }
 
 /**

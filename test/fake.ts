@@ -9,6 +9,7 @@ import { Roster } from "../src/roster.js"
 import { Runner } from "../src/runner.js"
 import { Spawner } from "../src/spawner.js"
 import type { CommandDefinition, CommandInvocation } from "../src/commands.js"
+import type { MutableAgent } from "../src/roles.js"
 import type { SkillDefinition } from "../src/skill.js"
 import type { WorkflowTool } from "../src/tools.js"
 
@@ -85,8 +86,11 @@ function makeWorld() {
   const synthetic: Synthetic[] = []
   const sessions = new Map<string, FakeSession>()
   const messages = new Map<string, unknown[]>()
-  const generated: { prompt: string }[] = []
-  const agents: { name: string; mode: string }[] = [{ name: "general", mode: "subagent" }]
+  const generated: { prompt: string; model?: { providerID: string; id: string; variant?: string } }[] = []
+  /** What `ctx.agent.list` answers, and what `ctx.agent.transform` writes into. */
+  const agents: MutableAgent[] = [{ id: "general", name: "general", mode: "subagent", permissions: [] }]
+  /** What `ctx.catalog.model.list` answers. A test pushes the model it wants listed. */
+  const models: { id: string; modelID: string; providerID: string }[] = []
   /** What `ctx.plugin.list` answers. A test pushes the entry of a plugin it wants seen. */
   const plugins: Record<string, unknown>[] = []
   const queue: unknown[] = []
@@ -229,7 +233,7 @@ function makeWorld() {
   }
 
   const generate = {
-    text: async (input: { prompt: string }) => {
+    text: async (input: { prompt: string; model?: { providerID: string; id: string; variant?: string } }) => {
       generated.push(input)
       return { text: generatedText }
     },
@@ -252,6 +256,7 @@ function makeWorld() {
     generated,
     generate,
     agents,
+    models,
     plugins,
     flight,
     emit,
@@ -319,6 +324,8 @@ export interface Fake extends World {
   run: (name: string, input: unknown, context?: Partial<SpawnContext>) => Promise<{ content: unknown; output: unknown }>
   /** Calls the registered `context` hook with a request the host would have built. */
   context: (sessionID: string) => Promise<ContextEvent>
+  /** Runs the agent transform again, the way the host does on a reload. */
+  replayAgentTransform: () => void
   asked: string[]
   disposed: string[]
   cleanup: Plugin.Cleanup | void
@@ -349,6 +356,26 @@ export async function startPlugin(
   const asked: string[] = []
   const disposed: string[] = []
   const hooks = new Map<string, (event: unknown) => Promise<void>>()
+  const agentTransforms: ((draft: unknown) => void)[] = []
+
+  /** `draft.update` creates the agent when there is none, from core's primary default. */
+  const agentDraft = {
+    list: () => world.agents,
+    get: (id: string) => world.agents.find((agent) => agent.id === id),
+    default: () => {},
+    update: (id: string, update: (agent: MutableAgent) => void) => {
+      let found = world.agents.find((agent) => agent.id === id)
+      if (!found) {
+        found = { id, name: id, mode: "primary", permissions: [] }
+        world.agents.push(found)
+      }
+      update(found)
+    },
+    remove: (id: string) => {
+      const index = world.agents.findIndex((agent) => agent.id === id)
+      if (index >= 0) world.agents.splice(index, 1)
+    },
+  }
 
   const ctx = {
     options: options.options ?? {},
@@ -367,7 +394,19 @@ export async function startPlugin(
     },
     generate: world.generate,
     // The host answers `{ location, data }`, not a plain array.
-    agent: { list: async () => ({ location: {}, data: world.agents }) },
+    agent: {
+      list: async () => ({ location: {}, data: world.agents }),
+      transform: async (callback: (draft: unknown) => void) => {
+        agentTransforms.push(callback)
+        callback(agentDraft)
+        return {
+          dispose: async () => {
+            disposed.push("agent.transform")
+          },
+        }
+      },
+    },
+    catalog: { model: { list: async () => ({ location: {}, data: world.models }) } },
     plugin: { list: async () => ({ location: {}, data: world.plugins }) },
     event: { subscribe: world.subscribe },
     command: {
@@ -450,6 +489,9 @@ export async function startPlugin(
       }
       await hooks.get("context")?.(event)
       return event
+    },
+    replayAgentTransform: () => {
+      for (const callback of agentTransforms) callback(agentDraft)
     },
     asked,
     disposed,

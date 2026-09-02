@@ -1,4 +1,6 @@
+import { ROLE_NAMES } from "./config.js"
 import { DSL } from "./spec.js"
+import { TEMPLATE_NAMES } from "./templates.js"
 
 /** `ctx.command.transform` draft entry, reduced to what this module builds. */
 export interface CommandDefinition {
@@ -28,6 +30,12 @@ const DEFAULTS = [
   'the result of the one before it, and a "team" phase only when the members have to ask you questions',
   'while they work. Set "retries": 1 on every task. Do not set "model". Set "isolation": "worktree"',
   'only when a task edits files and has to stay out of the main checkout.',
+  'Put a reviewer gate after an editing task: give the phase "repeat": { "gate": "review", "maxRounds": 3 }',
+  'and make the last task a "reviewer" with an "outputSchema" that requires "approved".',
+  'When your own agent may not edit files, use only the read-only roles',
+  `(${ROLE_NAMES.join(", ")}), no shell task, and no worktree.`,
+  `For a build or a plan goal, prefer a built-in workflow (${TEMPLATE_NAMES.join(", ")}):`,
+  'call workflow_run_saved with that "name" and the goal as "goal" instead of writing a spec.',
 ].join("\n")
 
 /**

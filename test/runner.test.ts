@@ -226,3 +226,23 @@ it("marks a run left running by a restart as orphaned", async () => {
   await fake.runner.cancel({ runId })
   await fake.stop()
 })
+
+it("adds no worktree section when no earlier task of the phase was isolated", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(
+    sequential([
+      { id: "a", kind: "agent", prompt: "first", retries: 0, keep: false },
+      { id: "b", kind: "agent", prompt: "second", retries: 0, keep: false },
+    ]),
+    START,
+  )
+
+  ;(await waitForSpawn(fake, 1)).settle("ALPHA RESULT")
+  const second = await waitForSpawn(fake, 2)
+  expect(second.input.prompt).not.toContain("Edits of the earlier worktree tasks")
+  expect(second.input.prompt).not.toContain('source="worktree"')
+
+  second.settle("BETA RESULT")
+  await fake.runner.wait(runId)
+  await fake.stop()
+})

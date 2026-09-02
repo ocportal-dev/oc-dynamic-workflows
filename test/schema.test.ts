@@ -77,3 +77,16 @@ it("accepts the README example: every required key is set and no key is unknown"
   for (const key of Object.keys(README_EXAMPLE)) expect(Object.keys(schema.properties)).toContain(key)
   expect(parseSpec(README_EXAMPLE, LIMITS).ok).toBe(true)
 })
+
+it("carries the repeat gate of a phase", () => {
+  const phase = (schema.properties.phases as { items: { properties: Record<string, unknown> } }).items
+  expect(phase.properties.repeat).toEqual({
+    type: "object",
+    additionalProperties: false,
+    required: ["gate", "maxRounds"],
+    properties: {
+      gate: { type: "string", minLength: 1 },
+      maxRounds: { type: "integer", minimum: 1, maximum: 5 },
+    },
+  })
+})

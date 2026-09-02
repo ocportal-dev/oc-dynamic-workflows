@@ -136,7 +136,7 @@ it("reads a saved workflow from the project directory", async () => {
   await save(directory, "demo", SPEC as unknown as WorkflowSpec)
   const fake = await startPlugin({ directory })
 
-  expect((await fake.run("workflow_list", {})).content).toBe("demo")
+  expect((await fake.run("workflow_list", {})).content).toStartWith("demo\n")
   expect((await fake.run("workflow_show", { name: "demo" })).content).toContain('"specVersion": 1')
   expect((await fake.run("workflow_run_saved", { name: "demo" })).content).toContain("workflow: demo")
   expect((await fake.run("workflow_run", { specRef: "demo" })).content).toContain("workflow: demo")
@@ -145,7 +145,9 @@ it("reads a saved workflow from the project directory", async () => {
 it("reports a missing saved workflow", async () => {
   const directory = await mkdtemp(join(tmpdir(), "workflows-"))
   const fake = await startPlugin({ directory })
-  expect((await fake.run("workflow_list", {})).content).toBe("no saved workflows")
+  expect((await fake.run("workflow_list", {})).content).toBe(
+    "build-review (built-in)\nsecure-build (built-in)\nplan-research (built-in)",
+  )
   expect((await fake.run("workflow_run_saved", { name: "gone" })).content).toStartWith("error: ")
   expect((await fake.run("workflow_show", { name: "../escape" })).content).toStartWith("error: ")
 })
@@ -181,5 +183,47 @@ it("disposes every registration on cleanup", async () => {
   const fake = await startPlugin()
   expect(typeof fake.cleanup).toBe("function")
   if (typeof fake.cleanup === "function") await fake.cleanup()
-  expect(fake.disposed.sort()).toEqual(["command.transform", "session.hook", "skill.transform", "tool.transform"])
+  expect(fake.disposed.sort()).toEqual([
+    "agent.transform",
+    "command.transform",
+    "session.hook",
+    "skill.transform",
+    "tool.transform",
+  ])
+})
+
+it("registers one read-only subagent per role", async () => {
+  const fake = await startPlugin()
+  const roles = fake.agents.filter((agent) => agent.id !== "general")
+  expect(roles.map((agent) => agent.id)).toEqual(["reviewer", "security-reviewer", "researcher", "stakeholder"])
+  for (const agent of roles) {
+    expect(agent.mode, agent.id).toBe("subagent")
+    expect(agent.system, agent.id).toBeTruthy()
+    expect(agent.permissions, agent.id).toContainEqual({ action: "edit", resource: "*", effect: "deny" })
+  }
+})
+
+it("gives a role the model the options name and leaves the others on the lead's model", async () => {
+  const fake = await startPlugin({ options: { roles: { reviewer: { model: "anthropic/opus#thinking" } } } })
+  const reviewer = fake.agents.find((agent) => agent.id === "reviewer")
+  expect(reviewer?.model).toEqual({ providerID: "anthropic", id: "opus", variant: "thinking" })
+  expect(fake.agents.find((agent) => agent.id === "researcher")?.model).toBeUndefined()
+})
+
+it("registers no agent for a role the options point at another agent", async () => {
+  const fake = await startPlugin({ options: { roles: { researcher: { agent: "explore" } } } })
+  expect(fake.agents.map((agent) => agent.id)).not.toContain("researcher")
+})
+
+it("leaves one entry per role when the host replays the transform", async () => {
+  const fake = await startPlugin()
+  fake.replayAgentTransform()
+  fake.replayAgentTransform()
+  expect(fake.agents.filter((agent) => agent.id === "reviewer")).toHaveLength(1)
+  const reviewer = fake.agents.find((agent) => agent.id === "reviewer")!
+  expect(reviewer.permissions).toEqual([
+    { action: "edit", resource: "*", effect: "deny" },
+    { action: "subagent", resource: "*", effect: "deny" },
+    { action: "question", resource: "*", effect: "deny" },
+  ])
 })

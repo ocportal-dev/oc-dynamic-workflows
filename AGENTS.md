@@ -9,10 +9,13 @@ workflow spec, fan the tasks out to child sessions, join the results, and exchan
 with the members of a `team` phase.
 
 It runs `sequential`, `parallel`, and `team` phases, joins a phase with a synthesis, and
-shapes the request of every session that belongs to a run. A `team` phase runs like a
-`parallel` one with the hub mailbox open, so a member can reach the lead while it works and
-the lead can steer a member back. `workflow_resume` picks a run up again after a failure, a
-budget stop, a cancel, or a restart, and keeps every task that already completed.
+shapes the request of every session that belongs to a run. A `sequential` phase can carry a
+`repeat` gate, which runs the phase again until its last task approves the round. A `team`
+phase runs like a `parallel` one with the hub mailbox open, so a member can reach the lead
+while it works and the lead can steer a member back. `workflow_resume` picks a run up again
+after a failure, a budget stop, a cancel, or a restart, and keeps every task that already
+completed. Three workflows are built in, so a build or a plan goal needs no hand-written
+spec.
 
 This package targets OpenCode v2 (`opencode2`) only. It depends on `@opencode-ai/plugin`
 at an exact beta version, pinned as a runtime dependency, because opencode installs
@@ -38,25 +41,38 @@ publish date. Install with `npm install --min-release-age=0`.
 
 - **`src/index.ts`** — Plugin entry point. Attaches to the shared engine, building the store,
   the roster, the spawner, and the runner on the first instance. Registers the tools through
-  `ctx.tool.transform`, the commands through `ctx.command.transform`, and the skill through
-  `ctx.skill.transform`, captures the built-in `subagent` executor, starts the event consumer,
-  recovers orphaned runs on the first attach, and returns the cleanup function.
+  `ctx.tool.transform`, the commands through `ctx.command.transform`, the skill through
+  `ctx.skill.transform`, and the role agents through `ctx.agent.transform`, captures the
+  built-in `subagent` executor, starts the event consumer, recovers orphaned runs on the first
+  attach, and returns the cleanup function.
 - **`src/skill.ts`** — `workflowSkill(config)`: the `workflow` skill the plugin registers. Its
   body is built from the resolved options, and its grammar section is `DSL` from `src/spec.ts`.
+  Its sections are Built-in workflows, How to write a spec, Defaults, Roles, Review gates, and
+  Plan mode.
+- **`src/templates.ts`** — `TEMPLATE_NAMES`, `isTemplate`, and `template(name, config, goal)`:
+  the three built-in specs (`build-review`, `secure-build`, `plan-research`). A gate takes
+  `GATE_SCHEMA` and a role task takes `roleAgentId`, so a role the options redirect is followed
+  here too. The plugin substitutes no placeholder; the goal is a field of the spec.
 - **`src/commands.ts`** — The `/workflow`, `/workflow-status`, `/workflow-resume`, and
   `/workflow-cancel` slash commands. A command cannot answer with text, so each one builds an envelope and puts it in
   the calling session with `ctx.session.prompt`. Never throws.
 - **`src/budget.ts`** — Reads the caps off a run record and names the one it hit. A budget is
   never required.
 - **`src/config.ts`** — Reads `ctx.options`. Clamps every number. Never throws; an invalid
-  value becomes a warning and the default.
+  value becomes a warning and the default. Holds `ROLE_NAMES`, `parseModel`, and
+  `formatModel`, because `roles` and `synthesisModel` are parsed there.
+- **`src/roles.ts`** — The four role agents (`reviewer`, `security-reviewer`, `researcher`,
+  `stakeholder`): their prompts, `roleAgentId`, `roleAgents`, `READ_ONLY_RULES`, and
+  `applyRole`, which writes a role onto the agent the draft holds. `applyRole` is idempotent,
+  because the host replays the transform.
 - **`src/log.ts`** — The console prefix and `swallow`, the catch handler every promise that
   nobody awaits ends in. A timer, an event handler, and a cleanup path never throw.
 - **`src/types.ts`** — The normalized `WorkflowSpec` plus `RunRecord`, `PhaseRecord`,
   `TaskRecord`, and `MailEvent`.
 - **`src/spec.ts`** — The Zod schema for `specVersion: 1`, the alias normalization, the fill
   of a missing `specVersion` or `id`, and the v1 rejections. `parseSpec` returns either the
-  spec with one warning per filled field or a list of one-line messages.
+  spec with one warning per filled field or a list of one-line messages. Also holds the
+  `repeat` rules of a phase and `GATE_SCHEMA`, the answer its gate has to give.
 - **`src/engine.ts`** — `attach(prefix, build)` / `detach(prefix)`: the module-level, refcounted
   map of the one engine every plugin instance of a project shares, keyed by the storage prefix.
 - **`src/spec-store.ts`** — Reads and writes `<directory>/.opencode/workflows/<name>.json`.
@@ -76,9 +92,9 @@ publish date. Install with `npm install --min-release-age=0`.
   `session.usage.updated`, `session.execution.failed`, `session.inbox.delivered`,
   `permission.asked`, and `permission.replied`. Resubscribes with a backoff.
 - **`src/runner.ts`** — The detached run loop: phases in order, the sequential path, the
-  parallel worker pool, the team phase with its mailbox, the synthesis of a phase, retries,
-  timeouts, the run clock, the budget stop, context chaining, `outputSchema`, usage, cancel,
-  resume, orphan recovery, and the final report.
+  parallel worker pool, the `repeat` gate loop, the team phase with its mailbox, the
+  synthesis of a phase, retries, timeouts, the run clock, the budget stop, context chaining,
+  `outputSchema`, usage, cancel, resume, orphan recovery, and the final report.
 - **`src/mailbox.ts`** — The hub mailbox of a `team` phase: the send-side gate, the
   `<workflow-mail>` envelope, the mail records, the debounced lead wake, the steer, and the
   inbox. Also charges the lead's wakes to the run budget.
@@ -87,20 +103,26 @@ publish date. Install with `npm install --min-release-age=0`.
   the progress tree. Never throws, never writes.
 - **`src/output-schema.ts`** — Finds the first JSON object in a task output and checks it
   against a small JSON Schema subset. No dependency.
+- **`src/policy.ts`** — The plan-mode check: `wildcard` and `evaluate`, the port of core's
+  permission match, `agentRules`, `mayEdit`, and `readOnlyViolations`, the tasks of a spec
+  that can change files. No state, no host call.
 - **`src/shell.ts`** — `kind: "shell"` tasks through `Bun.spawn`.
 - **`src/worktree.ts`** — `create`, `settle`, `remove` for an `isolation: "worktree"` task, on
   top of `git` through `Bun.spawn`. Never throws.
-- **`src/report.ts`** — The spec tree, the progress tree, the final report, and
-  `wrapUntrusted`, the envelope every borrowed output is put in.
+- **`src/report.ts`** — The spec tree, the progress tree, the round lines and the gate
+  summary of a `repeat` phase, the final report, and `wrapUntrusted`, the envelope every
+  borrowed output is put in.
 - **`src/tools.ts`** — The `workflow_*` and `team_*` tool definitions, including
-  `workflow_resume` and `workflow_doctor`.
+  `workflow_resume` and `workflow_doctor`. `resolveSpec` is the one place a name becomes a
+  spec: the saved file of the project first, then a built-in.
   Every executor catches its own errors and returns a `Tool.Result`, and every executor
   that drives the engine refuses a member session first.
 - **Root `index.ts`** — Development shim. Re-exports the default export of `src/index.ts` so
   a local directory path works as a configured plugin with no build step.
 - **`test/`** — One test file per area. `test/fake.ts` holds the scripted context: a
   subagent executor whose calls stay pending until the test settles them, an event stream,
-  an in-memory storage, and recorders for the session calls.
+  an in-memory storage, an agent draft `ctx.agent.transform` writes into, a model catalog,
+  and recorders for the session calls.
 
 ## OpenCode v2 API facts this code depends on
 
@@ -208,11 +230,32 @@ live `opencode2` (spike S6).
   (`@opencode-ai/plugin/dist/promise/adapter.js:352`), so a rejection is a defect, and the
   direct path catches `Tool.Error` only (`core/src/session/runner/step.ts:122`) and then fails
   every unsettled tool call of the step (`step.ts:198-206`).
-- `ctx.generate.text({ prompt, model? })` resolves to `{ text }`. With no `model` it uses
-  the catalog default. It can answer with an empty string, so an empty synthesis is
+- `ctx.generate.text({ prompt, model? })` resolves to `{ text }`. `model` is a `Model.Ref`
+  (`{ providerID, id, variant? }`) with branded strings, so `src/index.ts` casts once. With no
+  `model` it uses the catalog default. It can answer with an empty string, so an empty synthesis is
   recorded as a failure instead of being passed on.
 - `ctx.agent.list()` resolves to `{ location, data: Agent.Info[] }`, not to a plain array.
   An `Agent.Info` carries `id`, `name`, and `mode` (`subagent`, `primary`, or `all`).
+- `ctx.agent.transform(callback)` works like the other transforms. The draft has `list()`,
+  `get(id)`, `default(id)`, `update(id, fn)`, and `remove(id)`. `update` creates the agent when
+  there is none, from `Agent.Info.default(id)`, which is `mode: "primary"` with allow-all
+  permissions, so a role has to set `mode = "subagent"` and push its own denies. The host
+  replays the transform on reload, so `applyRole` replaces its rules instead of appending them.
+  A user `agents:` entry is applied after this transform and wins.
+- Core evaluates a permission rule list last-match-wins with the default `ask`, and matches
+  both `action` and `resource` with `Wildcard.match`, where only `*` is a wildcard and the
+  pattern is anchored. `edit` covers edit, write, and patch. Core's `plan` agent carries
+  `edit * deny` then `edit ~/.opencode/plan/* allow`, so it still denies `edit` for `*`.
+  `src/policy.ts` ports both functions, because the host exposes neither.
+- An `Agent.Info` also carries `model?: { providerID, id, variant? }`, `system?`, `description?`,
+  and `permissions: { action, resource, effect }[]`. The string form of a model is
+  `provider/model[#variant]`. `id`, `name`, and the model fields are branded, so `src/index.ts`
+  casts the draft agent once, the way it casts the skill entry.
+- The child of a spawn takes `agent.model ?? parent.model`, and the executor input carries no
+  model, so a registered agent with a `model` is the only way to give a task its own model.
+- `ctx.catalog.model.list()` resolves to `{ location, data: Model.Info[] }`. A `Model.Info`
+  carries `id`, `modelID`, and `providerID`, which is how `workflow_doctor` tells a model the
+  catalog lists from one it does not.
 - `ctx.plugin.list()` resolves to `{ location, data: Plugin.Info[] }`, the shape
   `ctx.agent.list()` uses. A `Plugin.Info` carries an optional `id`, a `source`, `features`,
   and `state`, which is `{ status: "active" }` or `{ status: "failed", error }`. A plugin that
@@ -263,6 +306,27 @@ live `opencode2` (spike S6).
   the other workers; the phase is `completed`, `partial`, or `failed`.
 - A `team` phase is that same pool with the mailbox open for its tasks. The phase joins
   when every task is terminal, and the mailbox closes with it, so a late send is refused.
+- A `repeat` phase is one `sequential` phase run again until its gate approves the round.
+  The gate is the last task, it answers with `approved`, and the verdict is read off
+  `task.data`, so `outputSchema` has already checked the shape. A round that is refused
+  resets every task of the phase, keeps `usage`, and runs it again with the findings in the
+  prompt. The loop ends on an approval, on a gate that did not complete, at `maxRounds`, and
+  on a cancel, the run clock, or the budget. The synthesis runs once, after the last round.
+- Between two rounds no task is pending or running, so `#overBudget` finds nothing to stop
+  and lets the run pass. `#roundBudget` reads the cap there instead, which is why a budget
+  stop between rounds still ends the run `partial` with the cap named.
+- One `RoundRecord` per finished round, and a round that is run again replaces its entry, so
+  a resume in the middle of a round does not write the same round twice. A phase whose gate
+  never approves still joins as `completed` when every task completed; the report line is
+  how the lead learns the verdict.
+- A resume starts the next round of a `repeat` phase whose last round was refused and that
+  has rounds left, instead of keeping the phase whole. A phase cut inside a round resumes at
+  `phase.round` with its completed tasks kept.
+- Round N+1 of a worktree task starts from a fresh worktree of `HEAD`, and its settle
+  overwrites `<runId>/<taskId>.patch`, so only the newest patch is on disk. The prompt of the
+  new round therefore names `git apply <patch>` before the task text.
+- `maxAgents` counts the tasks of the spec, not the rounds, so a `repeat` phase can spawn up
+  to `maxRounds` times its tasks. Only a budget bounds it.
 - A `question` wakes the lead, a `status` and a `result` do not. A burst of questions is
   collected for two seconds and becomes one wake, and the join adds one wake with the
   digest of the unread mail. Every mail travels in an escaped `<workflow-mail>` envelope
@@ -270,8 +334,10 @@ live `opencode2` (spike S6).
 - A steer to a task that has not started yet is kept and shown to the member by the context
   hook, because the hook may not write. It is marked delivered by
   `session.inbox.delivered`, or when the steer prompt is admitted.
-- A `sequential` phase passes the earlier task outputs on. A `parallel` phase does not,
-  because the order of the results is not fixed. Across phases only the synthesis travels.
+- A `sequential` phase passes the earlier task outputs on, and, for an earlier worktree task,
+  the path of the patch it left, its stat, and the kept worktree when there is one, because
+  those edits are in no checkout the next member can see. A `parallel` phase passes neither
+  on, because the order of the results is not fixed. Across phases only the synthesis travels.
 - Every output of a member or a shell command is wrapped in `<untrusted>` before it is put
   in another prompt, and its markup is escaped.
 - The context hook never writes state and never throws, because it fires on every request.
@@ -290,7 +356,37 @@ live `opencode2` (spike S6).
 - A restart leaves no run loop behind, so `recoverOrphans` marks such a run `orphaned`,
   marks its `running` tasks `cancelled`, and interrupts every member that has no outcome
   yet, because core resumes a suspended child on its own. The lead is not woken.
-- `task.model` is rejected in v1 with a message that names the fix.
+- `task.model` is rejected in v1 with a message that names the fix. A model per task comes
+  from a role instead: `options.roles.<role>.model` lands on the agent the plugin registers,
+  and a task that names that role runs on it.
+- Every role is read-only. `READ_ONLY_RULES` denies `edit`, `subagent`, and `question`, because
+  a role reads and reports, and a member that stops to ask holds its task open.
+- A lead that cannot edit may not start or resume a run that can. `workflow_run`,
+  `workflow_run_saved`, and `workflow_resume` read the rules of the calling agent through
+  `ctx.agent.list` and refuse a spec that holds a shell task, a worktree task, or a task on an
+  agent that may edit. The refusal names every such task and the fix, and happens before
+  `runner.start`, so nothing is spawned and no record is written. An agent the host does not
+  list has no rules: that reads as no policy for the lead, so an unknown lead agent is never
+  stopped, and as may-edit for a task, so an unknown task agent never slips past. The context
+  hook is not touched, because it fires on every request and may not call the host.
+- A role the options point at another agent (`roles.<role>.agent`) is not registered at all, so
+  the plugin never writes over an agent the user owns. `workflow_doctor` reports the agent and
+  the model each role resolved to, and names an agent that does not exist or a model the
+  catalog does not list.
+- A name becomes a spec in one place, `resolveSpec`. The saved file of the project is read
+  first, so `<name>.json` shadows the built-in of that name and a project can replace one. A
+  built-in carries no goal, so a call without `goal` is refused before anything is spawned, and
+  a `goal` given with a saved file replaces the goal that file holds. `workflow_show` prints a
+  built-in with a stand-in goal; nothing else ever substitutes text into a template.
+- `DSL` names the three built-ins as literal text instead of importing `TEMPLATE_NAMES`,
+  because `src/templates.ts` imports `GATE_SCHEMA` from `src/spec.ts` and the cycle would read
+  the const before it is initialised. `test/templates.test.ts` fails when the two drift apart.
+  The roles in `DSL` come from `ROLE_NAMES`, because `src/config.ts` imports nothing.
+- The `draft` task of `plan-research` runs on `researcher` and its prompt says to answer with
+  the plan instead of the role's JSON shape. A plan is prose, and only a read-only role keeps
+  the workflow startable under a plan-mode lead.
+- `options.synthesisModel` is the model of every phase synthesis. The key is left out of the
+  `ctx.generate.text` call when there is none, so the catalog default is used.
 - D14, one engine per project. `src/engine.ts` holds it, keyed by the storage prefix and
   refcounted. A worktree is another location, so opencode boots a second plugin instance for
   it, and that instance serves the member's hooks, tool calls, and events. It has to see the

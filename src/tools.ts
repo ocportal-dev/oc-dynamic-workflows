@@ -1,15 +1,18 @@
 import type { Info } from "@opencode-ai/plugin/promise/tool"
 import { z } from "zod"
-import type { WorkflowConfig } from "./config.js"
+import { formatModel, ROLE_NAMES, type ModelRef, type RoleName, type WorkflowConfig } from "./config.js"
 import { envelope, type Mailbox } from "./mailbox.js"
 import type { RunStore } from "./persistence.js"
+import { agentRules, mayEdit, readOnlyViolations } from "./policy.js"
 import { renderErrors, renderSpecTree, renderStatus } from "./report.js"
+import { roleAgentId } from "./roles.js"
 import type { Roster } from "./roster.js"
 import type { Runner } from "./runner.js"
 import type { Spawner } from "./spawner.js"
 import { DSL, parseSpec } from "./spec.js"
 import * as store from "./spec-store.js"
-import type { MailEvent } from "./types.js"
+import { isTemplate, template, TEMPLATE_NAMES, type TemplateName } from "./templates.js"
+import type { MailEvent, WorkflowSpec } from "./types.js"
 
 export interface ToolDeps {
   config: WorkflowConfig
@@ -29,12 +32,17 @@ export interface ToolDeps {
   mailbox: Mailbox
   /** `ctx.agent.list`. Missing means the agent cannot be checked. */
   agents?: () => Promise<unknown>
+  /** `ctx.catalog.model.list`. Missing means a role model cannot be checked. */
+  models?: () => Promise<unknown>
   /** `ctx.plugin.list`. Missing means the permission classifier cannot be checked. */
   plugins?: () => Promise<unknown>
 }
 
 /** The sibling plugin that reviews a permission ask. It registers nothing else to look for. */
 const CLASSIFIER_ID = "opencode-permissions-classifier"
+
+/** The goal `workflow_show` gives a built-in, which carries none until it is run. */
+const SHOWN_GOAL = "<the goal you pass to workflow_run_saved>"
 
 export type WorkflowTool = Info
 
@@ -63,6 +71,8 @@ const Outcome = z.object({
   /** The fields the loader filled in. A start sets it, empty when the spec was complete. */
   warnings: z.array(z.string()).optional(),
   names: z.array(z.string()).optional(),
+  /** The built-in names of `names` that no saved file of the project shadows. */
+  builtin: z.array(z.string()).optional(),
   /** Whether the built-in subagent executor was captured. Members cannot be spawned without it. */
   executor: z.enum(["available", "missing"]).optional(),
   runId: z.string().optional(),
@@ -123,9 +133,29 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
     )
   }
 
+  /**
+   * A lead in plan mode may not have its members edit for it.
+   *
+   * The lead's agent comes with the tool call, so only the agent list is fetched. An agent
+   * the host does not list has no rules, which reads as no policy, and the run goes ahead.
+   */
+  const denyEdits = async (spec: WorkflowSpec, context: Caller): Promise<Result | undefined> => {
+    const agents = await listAgents(deps)
+    if (mayEdit(agentRules(agents, context.agent))) return undefined
+    const violations = readOnlyViolations(spec, agents, deps.config.defaultAgent)
+    if (!violations.length) return undefined
+    const error = `your agent "${context.agent}" cannot edit, so this run may not edit either:`
+    return {
+      content: [error, ...violations.map((line) => `  - ${line}`)].join("\n"),
+      output: { ok: false, error, errors: violations },
+    }
+  }
+
   const startRun = async (source: unknown, context: Caller, overrides: z.infer<typeof Overrides>): Promise<Result> => {
     const parsed = parseSpec(source, limits)
     if (!parsed.ok) return { content: renderErrors(parsed.errors), output: { ok: false, errors: parsed.errors } }
+    const refused = await denyEdits(parsed.spec, context)
+    if (refused) return refused
     const executor = deps.spawner.available() ? "available" : "missing"
     const runId = await deps.runner.start(parsed.spec, {
       lead: context.sessionID,
@@ -152,10 +182,41 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
     }
   }
 
-  const startSaved = async (name: unknown, context: Caller, overrides: z.infer<typeof Overrides>): Promise<Result> => {
+  /** The built-in a name points at, or undefined when a saved file of the project shadows it. */
+  const builtin = async (name: unknown): Promise<TemplateName | undefined> => {
+    if (typeof name !== "string" || !isTemplate(name)) return undefined
+    return (await store.list(deps.directory)).includes(name) ? undefined : name
+  }
+
+  /**
+   * The spec behind a name: the saved file of the project first, then a built-in.
+   *
+   * A built-in carries no goal of its own, so it needs one. A goal passed with a saved
+   * file replaces the goal that file holds, which is how one spec serves several asks.
+   */
+  const resolveSpec = async (name: unknown, goal: string | undefined): Promise<store.LoadResult> => {
+    const wanted = goal?.trim()
+    const found = await builtin(name)
+    if (found) {
+      if (!wanted) {
+        return { ok: false, error: `the built-in workflow "${found}" needs a goal; pass "goal" with what it should do` }
+      }
+      return { ok: true, value: template(found, deps.config, wanted) }
+    }
     const loaded = await store.load(deps.directory, name)
-    if (!loaded.ok) return fail(loaded.error)
-    return startRun(loaded.value, context, overrides)
+    if (!loaded.ok || !wanted || !isRecord(loaded.value)) return loaded
+    return { ok: true, value: { ...loaded.value, goal: wanted } }
+  }
+
+  const startSaved = async (
+    name: unknown,
+    goal: string | undefined,
+    context: Caller,
+    overrides: z.infer<typeof Overrides>,
+  ): Promise<Result> => {
+    const resolved = await resolveSpec(name, goal)
+    if (!resolved.ok) return fail(resolved.error)
+    return startRun(resolved.value, context, overrides)
   }
 
   const guarded =
@@ -179,7 +240,8 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
         "for; the user does not have to write it.",
         'Triggers: "in parallel", "at the same time", "fan out", "spawn agents", "several agents",',
         '"one per file", "pipeline", "then feed that into", "have a team".',
-        'Pass "spec" as an object or a JSON string, or pass "specRef" to use a saved workflow.',
+        'Pass "spec" as an object or a JSON string, or pass "specRef" to use a saved or a built-in workflow.',
+        'With "specRef", "goal" says what to work on: a built-in needs one, and a saved workflow takes it in place of its own goal.',
         "Prefer the subagent tool instead for a single task, and prefer doing it yourself for anything",
         "under about two minutes of work.",
         DETACHED,
@@ -188,6 +250,7 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       input: z.object({
         spec: z.unknown().optional(),
         specRef: z.string().optional(),
+        goal: z.string().optional(),
         overrides: Overrides,
       }),
       output: Outcome,
@@ -195,25 +258,28 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
         const denied = await denyMember(context, "start a workflow", "Do your own task and reply with the result.")
         if (denied) return denied
         if (input.spec !== undefined) return startRun(input.spec, context, input.overrides)
-        if (input.specRef !== undefined) return startSaved(input.specRef, context, input.overrides)
+        if (input.specRef !== undefined) return startSaved(input.specRef, input.goal, context, input.overrides)
         return fail('pass either "spec" or "specRef"')
       }),
     },
     {
       name: "workflow_run_saved",
       description: [
-        "Use when the user asks to run a workflow this project already has, by name.",
-        "Start a workflow saved under .opencode/workflows/.",
+        "Use when the user asks to run a workflow this project already has, by name, and when a build",
+        "or a plan goal fits one of the built-in workflows.",
+        "Start a workflow saved under .opencode/workflows/, or one of the built-in ones.",
+        `The built-in names are ${TEMPLATE_NAMES.join(", ")}, and each one needs "goal".`,
+        'A saved file of the same name is used instead, and a "goal" replaces the goal it holds.',
         'Use workflow_list to see the names. The saved file must set "specVersion": 1.',
         DETACHED,
         DSL,
       ].join("\n"),
-      input: z.object({ name: z.string(), overrides: Overrides }),
+      input: z.object({ name: z.string(), goal: z.string().optional(), overrides: Overrides }),
       output: Outcome,
       execute: guarded(async (input, context) => {
         const denied = await denyMember(context, "start a workflow", "Do your own task and reply with the result.")
         if (denied) return denied
-        return startSaved(input.name, context, input.overrides)
+        return startSaved(input.name, input.goal, context, input.overrides)
       }),
     },
     {
@@ -279,6 +345,10 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
       execute: guarded(async (input, context) => {
         const denied = await denyMember(context, "resume a run", "Do your own task and reply with the result.")
         if (denied) return denied
+        // The spec of the stored run, because a resume re-homes the lead to this session.
+        const stored = await deps.runs.get(input.runId)
+        const refused = stored ? await denyEdits(stored.spec, context) : undefined
+        if (refused) return refused
         const resumed = await deps.runner.resume(input.runId, {
           lead: context.sessionID,
           leadAgent: context.agent,
@@ -305,32 +375,40 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
     {
       name: "workflow_list",
       description: [
-        "List the workflows this project has saved under .opencode/workflows/.",
+        "List the workflows this project has saved under .opencode/workflows/, plus the built-in ones.",
         "Use when the user asks what workflows exist, or before workflow_run_saved when the name is not certain.",
+        'A built-in is marked "(built-in)" and needs a "goal" when it is run.',
       ].join("\n"),
       input: z.object({}),
       output: Outcome,
       execute: guarded(async () => {
-        const names = await store.list(deps.directory)
-        const content = names.length ? names.join("\n") : "no saved workflows"
-        return { content, output: { ok: true, names } }
+        const saved = await store.list(deps.directory)
+        // A saved file shadows the built-in of the same name, so it is listed only once.
+        const builtins = TEMPLATE_NAMES.filter((name) => !saved.includes(name))
+        const content = [...saved, ...builtins.map((name) => `${name} (built-in)`)].join("\n")
+        return { content, output: { ok: true, names: [...saved, ...builtins], builtin: [...builtins] } }
       }),
     },
     {
       name: "workflow_show",
       description: [
-        "Use when the user asks to see a saved workflow before running or editing it.",
-        "Show the JSON of one workflow saved under .opencode/workflows/.",
+        "Use when the user asks to see a saved or a built-in workflow before running or editing it.",
+        "Show the JSON of one workflow saved under .opencode/workflows/, or of one of the built-in ones.",
         'Every saved spec sets "specVersion": 1.',
         DSL,
       ].join("\n"),
       input: z.object({ name: z.string() }),
       output: Outcome,
       execute: guarded(async (input) => {
-        const loaded = await store.load(deps.directory, input.name)
+        const found = await builtin(input.name)
+        const loaded = found
+          ? { ok: true as const, value: template(found, deps.config, SHOWN_GOAL) }
+          : await store.load(deps.directory, input.name)
         if (!loaded.ok) return fail(loaded.error)
         const spec = loaded.value as Record<string, unknown>
-        return { content: JSON.stringify(spec, null, 2), output: { ok: true, spec } }
+        // A built-in has no goal of its own, so the one shown is a stand-in for the real ask.
+        const note = found ? `built-in workflow "${found}"; pass your own "goal" when you run it` : undefined
+        return { content: [note, JSON.stringify(spec, null, 2)].filter(Boolean).join("\n"), output: { ok: true, spec } }
       }),
     },
     {
@@ -467,9 +545,15 @@ function mailOut(mail: MailEvent): {
   }
 }
 
+type AgentState = "subagent" | "primary" | "all" | "missing" | "unknown"
+/** Whether the catalog lists the model a role names. `inherited` means the role names none. */
+type ModelState = "listed" | "unlisted" | "unknown" | "inherited"
+
 type Doctor = {
   executor: "available" | "missing"
-  defaultAgent: { name: string; state: "subagent" | "primary" | "all" | "missing" | "unknown" }
+  defaultAgent: { name: string; state: AgentState }
+  roles: { role: RoleName; agent: string; state: AgentState; model?: string; modelState: ModelState }[]
+  synthesisModel?: string
   classifier: { state: "active" | "failed" | "absent" | "unknown"; error?: string }
   warnings: string[]
   invalidSpecs: { name: string; error: string }[]
@@ -502,9 +586,25 @@ async function diagnose(deps: ToolDeps): Promise<Doctor> {
       ageMinutes: Math.max(0, Math.round((now - Date.parse(entry.updatedAt)) / 60_000)),
     }))
 
+  const agents = await listAgents(deps)
+  const models = await listModels(deps)
+  const synthesisModel = deps.config.synthesisModel
+
   return {
     executor: deps.spawner.available() ? "available" : "missing",
-    defaultAgent: { name: deps.config.defaultAgent, state: await agentState(deps) },
+    defaultAgent: { name: deps.config.defaultAgent, state: agentState(agents, deps.config.defaultAgent) },
+    roles: ROLE_NAMES.map((role) => {
+      const model = deps.config.roles[role].model
+      const agent = roleAgentId(deps.config, role)
+      return {
+        role,
+        agent,
+        state: agentState(agents, agent),
+        ...(model ? { model: formatModel(model) } : {}),
+        modelState: modelState(models, model),
+      }
+    }),
+    ...(synthesisModel ? { synthesisModel: formatModel(synthesisModel) } : {}),
     classifier: await classifierState(deps),
     warnings: deps.warnings,
     invalidSpecs,
@@ -515,20 +615,43 @@ async function diagnose(deps: ToolDeps): Promise<Doctor> {
 
 /**
  * `ctx.agent.list` resolves to `{ location, data }` on the pinned beta. A plain array is
- * accepted as well, and any other shape reports "unknown" instead of a wrong answer.
+ * accepted as well, and any other shape reads as undefined, which reports "unknown"
+ * instead of a wrong answer.
  */
-async function agentState(deps: ToolDeps): Promise<Doctor["defaultAgent"]["state"]> {
-  if (!deps.agents) return "unknown"
-  const listed = await deps.agents().catch(() => undefined)
+async function listAgents(deps: ToolDeps): Promise<unknown[] | undefined> {
+  if (!deps.agents) return undefined
+  return unwrapList(await deps.agents().catch(() => undefined))
+}
+
+/** `ctx.catalog.model.list` answers in the same shape. */
+async function listModels(deps: ToolDeps): Promise<unknown[] | undefined> {
+  if (!deps.models) return undefined
+  return unwrapList(await deps.models().catch(() => undefined))
+}
+
+function unwrapList(listed: unknown): unknown[] | undefined {
   const data = (listed as { data?: unknown } | undefined)?.data
-  const array = Array.isArray(listed) ? listed : Array.isArray(data) ? data : undefined
-  if (!array) return "unknown"
-  const found = array
+  return Array.isArray(listed) ? listed : Array.isArray(data) ? data : undefined
+}
+
+function agentState(agents: unknown[] | undefined, name: string): AgentState {
+  if (!agents) return "unknown"
+  const found = agents
     .map((entry) => entry as { id?: unknown; name?: unknown; mode?: unknown })
-    .find((entry) => entry.name === deps.config.defaultAgent || entry.id === deps.config.defaultAgent)
+    .find((entry) => entry.name === name || entry.id === name)
   if (!found) return "missing"
   if (found.mode === "subagent" || found.mode === "primary" || found.mode === "all") return found.mode
   return "unknown"
+}
+
+/** A model the catalog does not list fails at spawn, so the doctor is the early warning. */
+function modelState(models: unknown[] | undefined, model: ModelRef | undefined): ModelState {
+  if (!model) return "inherited"
+  if (!models) return "unknown"
+  const found = models
+    .map((entry) => entry as { id?: unknown; modelID?: unknown; providerID?: unknown })
+    .some((entry) => entry.providerID === model.providerID && (entry.id === model.id || entry.modelID === model.id))
+  return found ? "listed" : "unlisted"
 }
 
 /**
@@ -571,6 +694,15 @@ function renderDoctor(doctor: Doctor): string {
   if (doctor.defaultAgent.state === "missing") lines.push("  no agent has that name; set options.defaultAgent")
   if (doctor.defaultAgent.state === "primary") lines.push("  a primary agent cannot be a member; pick a subagent")
 
+  for (const role of doctor.roles) {
+    const model = role.model ? `${role.model} (${role.modelState})` : "inherited from the lead"
+    lines.push(`role ${role.role}: agent ${role.agent} (${role.state}), model ${model}`)
+    if (role.state === "missing") lines.push(`  no agent has that name; set options.roles.${role.role}.agent`)
+    if (role.state === "primary") lines.push("  a primary agent cannot be a member; pick a subagent")
+    if (role.modelState === "unlisted") lines.push("  the catalog does not list that model; the task fails at spawn")
+  }
+  if (doctor.synthesisModel) lines.push(`synthesis model: ${doctor.synthesisModel}`)
+
   lines.push(`option warnings: ${doctor.warnings.length}`)
   for (const warning of doctor.warnings) lines.push(`  - ${warning}`)
   lines.push(`saved specs that do not parse: ${doctor.invalidSpecs.length}`)
@@ -578,6 +710,10 @@ function renderDoctor(doctor: Doctor): string {
   lines.push(`runs still marked running: ${doctor.runningRuns.length}`)
   for (const run of doctor.runningRuns) lines.push(`  - ${run.runId} (${run.name}) ${run.ageMinutes} minutes old`)
   return lines.join("\n")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
 }
 
 function describe(error: unknown): string {

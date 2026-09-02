@@ -205,3 +205,19 @@ it("records a synthesis that cannot run without stopping the phase", async () =>
   expect(run?.status).toBe("completed")
   await fake.stop()
 })
+
+it("runs the synthesis on the model the options name, and on the default without one", async () => {
+  const fake = startRunner({ options: { synthesisModel: "openai/gpt-5" } })
+  const runId = await fake.runner.start(parallel(1, "summarise"), START)
+  ;(await waitForSpawn(fake, 1)).settle("only output")
+  await fake.runner.wait(runId)
+  expect(fake.generated[0]!.model).toEqual({ providerID: "openai", id: "gpt-5" })
+  await fake.stop()
+
+  const plain = startRunner()
+  const other = await plain.runner.start(parallel(1, "summarise"), START)
+  ;(await waitForSpawn(plain, 1)).settle("only output")
+  await plain.runner.wait(other)
+  expect(Object.keys(plain.generated[0]!)).toEqual(["prompt"])
+  await plain.stop()
+})

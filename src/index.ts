@@ -7,6 +7,7 @@ import { contextHook } from "./hooks.js"
 import { PREFIX } from "./log.js"
 import { Mailbox } from "./mailbox.js"
 import { RunStore, storagePrefix } from "./persistence.js"
+import { applyRole, roleAgents } from "./roles.js"
 import { Roster } from "./roster.js"
 import { Runner } from "./runner.js"
 import { workflowSkill } from "./skill.js"
@@ -48,7 +49,8 @@ export default Plugin.define({
         mailbox,
         activeRuns: live,
         directory: ctx.location.directory,
-        generate: (input) => ctx.generate.text(input),
+        // `Model.Ref` carries branded strings, so the plain ref is cast once here.
+        generate: (input) => ctx.generate.text(input as never),
       })
       return { runs, roster, spawner, mailbox, runner, live }
     })
@@ -63,6 +65,7 @@ export default Plugin.define({
       roster,
       mailbox,
       agents: () => ctx.agent.list(),
+      models: () => ctx.catalog.model.list(),
       plugins: () => ctx.plugin.list(),
     })
     // The host replays the transform on every reload, so the probe result is reported once.
@@ -84,6 +87,10 @@ export default Plugin.define({
       // The listing entry costs one line per session; the body is fetched only when it is loaded.
       ctx.skill.transform((draft) => {
         draft.add(workflowSkill(config) as never)
+      }),
+      // One subagent per role, so a role can carry its own model and its own denies.
+      ctx.agent.transform((draft) => {
+        for (const role of roleAgents(config)) draft.update(role.id, (agent) => applyRole(agent as never, role))
       }),
       // Strips the engine tools from a member's request and shows the lead its progress.
       ctx.session.hook("context", contextHook({ roster, store: runs, mailbox })),

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { RunRecord, TaskSpec, WorkflowSpec } from "../src/types.js"
-import { create, exists, worktreePath } from "../src/worktree.js"
+import { create, exists, patchPath, worktreePath } from "../src/worktree.js"
 import { LEAD, LEAD_AGENT, PROJECT, startRunner, tick, until, waitForSpawn } from "./fake.js"
 
 const START = { lead: LEAD, leadAgent: LEAD_AGENT }
@@ -299,5 +299,93 @@ it("settles the worktree a restart left behind", async () => {
   expect(task?.worktree?.stat).toContain("half.txt")
   expect(await readFile(task!.worktree!.patch!, "utf8")).toContain("half.txt")
   expect(await exists(created.path)).toBe(false)
+  await fake.stop()
+})
+
+/** `a` edits in its own worktree; `b` runs after it and reads what it left behind. */
+function handOff(task: Partial<TaskSpec>): WorkflowSpec {
+  return {
+    specVersion: 1,
+    name: "hand-off",
+    goal: "pass the edits on",
+    phases: [
+      {
+        id: "p",
+        strategy: "sequential",
+        tasks: [
+          { id: "a", kind: "agent", prompt: "edit", retries: 0, isolation: "worktree", keep: false, ...task },
+          { id: "b", kind: "agent", prompt: "review", retries: 0, keep: false },
+        ],
+      },
+    ],
+  }
+}
+
+/** Runs `a` to its end, with `edit` deciding whether it changes anything. */
+async function runFirst(
+  fake: ReturnType<typeof startRunner>,
+  runId: string,
+  path: string,
+  edit?: () => Promise<void>,
+): Promise<void> {
+  const warm = await waitForSpawn(fake, 1)
+  warm.settle("ready")
+  await until(() => fake.moves.length === 1, "the move")
+  fake.move(warm.childID, path)
+  const real = await waitForSpawn(fake, 2)
+  if (edit) await edit()
+  real.settle("EDITED")
+}
+
+it("gives the next task of a sequential phase the patch of an earlier worktree task", async () => {
+  const home = await repository()
+  const fake = startRunner({ directory: home })
+  const runId = await fake.runner.start(handOff({}), START)
+  const path = worktreePath(home, runId, "a")
+  await runFirst(fake, runId, path, () => writeFile(join(path, "added.txt"), "new\n", "utf8"))
+
+  const next = await waitForSpawn(fake, 3)
+  const patch = patchPath(home, runId, "a")
+  expect(next.input.prompt).toContain("Edits of the earlier worktree tasks of this phase, saved as patches:")
+  expect(next.input.prompt).toContain('<untrusted source="worktree" id="a">')
+  expect(next.input.prompt).toContain(`patch: ${patch}`)
+  expect(next.input.prompt).toContain("1 file changed")
+  expect(next.input.prompt).toContain("edited this checkout directly")
+  expect(next.input.prompt).not.toContain("worktree kept at:")
+
+  next.settle("REVIEWED")
+  await fake.runner.wait(runId)
+  await fake.stop()
+})
+
+it("names the kept worktree of an earlier task as well as its patch", async () => {
+  const home = await repository()
+  const fake = startRunner({ directory: home })
+  const runId = await fake.runner.start(handOff({ keep: true }), START)
+  const path = worktreePath(home, runId, "a")
+  await runFirst(fake, runId, path, () => writeFile(join(path, "added.txt"), "new\n", "utf8"))
+
+  const next = await waitForSpawn(fake, 3)
+  expect(next.input.prompt).toContain(`patch: ${patchPath(home, runId, "a")}`)
+  expect(next.input.prompt).toContain(`worktree kept at: ${path}`)
+
+  next.settle("REVIEWED")
+  await fake.runner.wait(runId)
+  await fake.stop()
+})
+
+it("says an earlier worktree task changed nothing when it left no patch", async () => {
+  const home = await repository()
+  const fake = startRunner({ directory: home })
+  const runId = await fake.runner.start(handOff({}), START)
+  await runFirst(fake, runId, worktreePath(home, runId, "a"))
+
+  const next = await waitForSpawn(fake, 3)
+  expect(next.input.prompt).toContain('<untrusted source="worktree" id="a">')
+  expect(next.input.prompt).toContain("no changes")
+  expect(next.input.prompt).not.toContain("patch: ")
+
+  next.settle("REVIEWED")
+  await fake.runner.wait(runId)
   await fake.stop()
 })

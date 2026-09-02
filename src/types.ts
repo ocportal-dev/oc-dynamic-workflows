@@ -23,6 +23,13 @@ export interface MailboxSpec {
   maxMessages: number
 }
 
+/** The gate loop of a `sequential` phase: run it again until the gate approves. */
+export interface RepeatSpec {
+  /** The task id of the gate. It is the last task of the phase. */
+  gate: string
+  maxRounds: number
+}
+
 export interface PhaseSpec {
   id: string
   title?: string
@@ -31,6 +38,8 @@ export interface PhaseSpec {
   synthesisPrompt?: string
   /** Only allowed when `strategy` is `"team"`. */
   mailbox?: MailboxSpec
+  /** Only allowed when `strategy` is `"sequential"`. */
+  repeat?: RepeatSpec
 }
 
 export interface BudgetSpec {
@@ -80,12 +89,33 @@ export interface TaskRecord {
   endedAt?: string
 }
 
+/** One pass of a `repeat` phase, kept after the tasks of the next round reset them. */
+export interface RoundRecord {
+  round: number
+  /** What the gate said. Absent when the gate did not complete. */
+  approved?: boolean
+  /** `findings` or `gaps` of the gate's answer, each clipped. */
+  findings: string[]
+  tasks: {
+    taskId: string
+    status: TaskRecord["status"]
+    attempts: number
+    /** The patch a worktree task left in this round. The next round overwrites the file. */
+    patch?: string
+    usage: { usd: number; tokens: number }
+  }[]
+}
+
 export interface PhaseRecord {
   id: string
   strategy: "sequential" | "parallel" | "team"
   status: "pending" | "running" | "completed" | "partial" | "failed" | "skipped"
   /** Why the phase stopped. Set when the phase status is `"failed"`. */
   error?: string
+  /** `repeat` phases only: the round that is running, counted from 1. */
+  round?: number
+  /** `repeat` phases only: one entry per finished round. */
+  rounds?: RoundRecord[]
   tasks: TaskRecord[]
   synthesis?: { status: "pending" | "running" | "completed" | "failed"; output?: string; error?: string }
 }

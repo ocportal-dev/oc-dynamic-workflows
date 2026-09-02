@@ -1,5 +1,6 @@
 import { expect, it } from "bun:test"
 import { renderStatus } from "../src/report.js"
+import { GATE_SCHEMA } from "../src/spec.js"
 import type { RunRecord, WorkflowSpec } from "../src/types.js"
 import { LEAD, LEAD_AGENT, PROJECT, startRunner, tick, waitForSpawn } from "./fake.js"
 
@@ -288,5 +289,112 @@ it("caps one guidance text at 2000 characters", async () => {
   expect(task.guidance!.startsWith("x".repeat(2000))).toBe(true)
   ;(await waitForSpawn(fake, 4)).settle("GAMMA RESULT")
   await fake.runner.wait(runId)
+  await fake.stop()
+})
+
+/** A gate loop, so a resume can meet a phase that is in the middle of a round. */
+const GATED: WorkflowSpec = {
+  specVersion: 1,
+  name: "gated",
+  goal: "build it and have it reviewed",
+  phases: [
+    {
+      id: "build",
+      strategy: "sequential",
+      repeat: { gate: "review", maxRounds: 3 },
+      tasks: [
+        { id: "impl", kind: "agent", prompt: "implement it", retries: 0, keep: false },
+        { id: "review", kind: "agent", prompt: "review it", retries: 0, keep: false, outputSchema: GATE_SCHEMA },
+      ],
+    },
+  ],
+}
+
+it("resumes a round that was cut short and sends only the task that is left", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(GATED, START)
+  ;(await waitForSpawn(fake, 1)).settle("implemented")
+  ;(await waitForSpawn(fake, 2)).fail("the reviewer blew up")
+  await fake.runner.wait(runId)
+  expect((await fake.store.get(runId))!.phases[0]!.rounds![0]!.approved).toBeUndefined()
+
+  expect((await fake.runner.resume(runId, START)).ok).toBe(true)
+  const again = await waitForSpawn(fake, 3)
+  expect(again.input.description).toBe(`wf:${runId}:review`)
+  // The round did not change, so the prompt carries no round header.
+  expect(again.input.prompt).not.toContain("Round 2 of 3.")
+  expect(again.input.prompt).toContain("implemented")
+  again.settle('{"approved": true}')
+  await fake.runner.wait(runId)
+
+  const phase = (await fake.store.get(runId))!.phases[0]!
+  expect(fake.spawns).toHaveLength(3)
+  expect(phase.round).toBe(1)
+  // The round ran again, so it replaces its entry rather than adding a second.
+  expect(phase.rounds).toHaveLength(1)
+  expect(phase.rounds![0]!.approved).toBe(true)
+  expect((await fake.store.get(runId))?.status).toBe("completed")
+  await fake.stop()
+})
+
+it("resumes at the next round a run that stopped after an unapproved one", async () => {
+  const fake = startRunner()
+  const task = (taskId: string) => ({
+    taskId,
+    kind: "agent" as const,
+    status: "completed" as const,
+    attempts: 1,
+    output: `${taskId} output`,
+    usage: { usd: 0.01, tokens: 125 },
+  })
+  const record: RunRecord = {
+    runId: "wf_cut",
+    specVersion: 1,
+    projectID: PROJECT,
+    spec: GATED,
+    status: "orphaned",
+    concurrency: 1,
+    leadSessionID: LEAD,
+    leadAgent: LEAD_AGENT,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    budget: { spentUsd: 0.02, spentTokens: 250 },
+    mailbox: { maxMessages: 0, used: 0 },
+    phases: [
+      {
+        id: "build",
+        strategy: "sequential",
+        status: "completed",
+        round: 1,
+        rounds: [
+          {
+            round: 1,
+            approved: false,
+            findings: ["the flag is not read anywhere"],
+            tasks: [
+              { taskId: "impl", status: "completed", attempts: 1, usage: { usd: 0.01, tokens: 125 } },
+              { taskId: "review", status: "completed", attempts: 1, usage: { usd: 0.01, tokens: 125 } },
+            ],
+          },
+        ],
+        tasks: [task("impl"), task("review")],
+      },
+    ],
+  }
+  await fake.store.put(record)
+
+  expect((await fake.runner.resume("wf_cut", START)).ok).toBe(true)
+  const again = await waitForSpawn(fake, 1)
+  expect(again.input.description).toBe("wf:wf_cut:impl")
+  expect(again.input.prompt).toContain("Round 2 of 3.")
+  expect(again.input.prompt).toContain("the flag is not read anywhere")
+  again.settle("fixed it")
+  ;(await waitForSpawn(fake, 2)).settle('{"approved": true}')
+  await fake.runner.wait("wf_cut")
+
+  const phase = (await fake.store.get("wf_cut"))!.phases[0]!
+  expect(phase.round).toBe(2)
+  expect(phase.rounds!.map((round) => round.approved)).toEqual([false, true])
+  expect((await fake.store.get("wf_cut"))?.status).toBe("completed")
   await fake.stop()
 })

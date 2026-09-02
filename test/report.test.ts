@@ -77,3 +77,54 @@ it("shows the isolation of a task in the spec tree and its worktree in the statu
   expect(renderSpecTree(run.spec)).toContain("  - a (agent, retries=0, worktree, keep)")
   expect(renderStatus(run)).toContain("worktree /home/wt/a")
 })
+
+/** A run of a repeat phase where the gate refused both rounds. */
+function gated(): RunRecord {
+  const run = record({ output: "implemented" })
+  run.spec.phases[0] = {
+    id: "p",
+    strategy: "sequential",
+    repeat: { gate: "review", maxRounds: 2 },
+    tasks: [
+      { id: "a", kind: "agent", prompt: "build", retries: 0, keep: false },
+      { id: "review", kind: "agent", prompt: "review", retries: 0, keep: false },
+    ],
+  }
+  const phase = run.phases[0]!
+  phase.strategy = "sequential"
+  phase.round = 2
+  phase.rounds = [
+    { round: 1, approved: false, findings: ["the flag is not read anywhere"], tasks: [] },
+    { round: 2, approved: false, findings: ["still not read", "and it has no test"], tasks: [] },
+  ]
+  return run
+}
+
+it("shows the round of a repeat phase and one line per finished round", () => {
+  const status = renderStatus(gated())
+  expect(status).toContain("p [completed] round 2/2")
+  expect(status).toContain("  round 1: not approved (1 findings)")
+  expect(status).toContain("  round 2: not approved (2 findings)")
+})
+
+it("names a round the gate approved and one the gate never judged", () => {
+  const run = gated()
+  run.phases[0]!.rounds = [
+    { round: 1, approved: undefined, findings: [], tasks: [] },
+    { round: 2, approved: true, findings: [], tasks: [] },
+  ]
+  const status = renderStatus(run)
+  expect(status).toContain("  round 1: gate did not complete")
+  expect(status).toContain("  round 2: approved")
+})
+
+it("sums the gate up in the final report and wraps the last findings", () => {
+  const report = renderFinalReport(gated())
+  expect(report).toContain("Gate review of phase p: not approved (2 findings) after 2 of 2 rounds.")
+  expect(report).toContain('<untrusted source="gate" id="review">')
+  expect(report).toContain("still not read\nand it has no test")
+})
+
+it("shows the repeat gate of a phase in the spec tree", () => {
+  expect(renderSpecTree(gated().spec)).toContain("p [sequential] repeat gate=review maxRounds=2")
+})

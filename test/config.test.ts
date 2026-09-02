@@ -1,8 +1,11 @@
 import { expect, it } from "bun:test"
-import { resolveConfig } from "../src/config.js"
+import { parseModel, resolveConfig } from "../src/config.js"
+
+const NO_ROLES = { reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {} }
 
 const DEFAULTS = {
   defaultAgent: "general",
+  roles: NO_ROLES,
   concurrency: 4,
   maxAgents: 100,
   mailboxMaxMessages: 20,
@@ -37,6 +40,7 @@ it("keeps valid values", () => {
   })
   expect(config).toEqual({
     defaultAgent: "executor",
+    roles: NO_ROLES,
     concurrency: 8,
     maxAgents: 12,
     mailboxMaxMessages: 5,
@@ -103,4 +107,62 @@ it("falls back and warns on garbage values", () => {
     "options.shellTasks must be true or false; using true",
     "options.worktrees must be true or false; using true",
   ])
+})
+
+it("parses a model reference in every form core accepts", () => {
+  expect(parseModel("anthropic/claude-sonnet-4-5")).toEqual({ providerID: "anthropic", id: "claude-sonnet-4-5" })
+  expect(parseModel("anthropic/claude-opus-4-1#thinking")).toEqual({
+    providerID: "anthropic",
+    id: "claude-opus-4-1",
+    variant: "thinking",
+  })
+  // A model id may carry a slash of its own; only the first one splits the provider off.
+  expect(parseModel("openrouter/meta/llama-3.1")).toEqual({ providerID: "openrouter", id: "meta/llama-3.1" })
+})
+
+it("returns nothing for a model reference that is not provider/model", () => {
+  for (const text of ["", "sonnet", "/sonnet", "anthropic/", "anthropic/sonnet#", "a/b#c#d", "a#b/c"]) {
+    expect(parseModel(text), text).toBeUndefined()
+  }
+})
+
+it("reads the model and the agent of a role", () => {
+  const { config, warnings } = resolveConfig({
+    roles: { reviewer: { model: "anthropic/claude-opus-4-1#thinking" }, researcher: { agent: "  explore  " } },
+  })
+  expect(config.roles.reviewer).toEqual({
+    model: { providerID: "anthropic", id: "claude-opus-4-1", variant: "thinking" },
+  })
+  expect(config.roles.researcher).toEqual({ agent: "explore" })
+  expect(config.roles.stakeholder).toEqual({})
+  expect(warnings).toEqual([])
+})
+
+it("warns about an unknown role, a bad model, and a wrong type, and keeps every role", () => {
+  const { config, warnings } = resolveConfig({
+    roles: { auditor: {}, reviewer: { model: "sonnet" }, researcher: "explore", stakeholder: { agent: 7 } },
+  })
+  expect(config.roles).toEqual({ reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {} })
+  expect(warnings).toEqual([
+    "options.roles.auditor is not a role; the roles are reviewer, security-reviewer, researcher, stakeholder",
+    'options.roles.reviewer.model must be a "provider/model" string; ignoring it',
+    "options.roles.researcher must be an object; ignoring it",
+    "options.roles.stakeholder.agent must be a non-empty string; ignoring it",
+  ])
+})
+
+it("warns when roles is not an object", () => {
+  const { config, warnings } = resolveConfig({ roles: ["reviewer"] })
+  expect(config.roles.reviewer).toEqual({})
+  expect(warnings).toEqual(["options.roles must be an object; ignoring it"])
+})
+
+it("reads the synthesis model and warns about a bad one", () => {
+  expect(resolveConfig({ synthesisModel: "openai/gpt-5" }).config.synthesisModel).toEqual({
+    providerID: "openai",
+    id: "gpt-5",
+  })
+  const bad = resolveConfig({ synthesisModel: 7 })
+  expect(bad.config.synthesisModel).toBeUndefined()
+  expect(bad.warnings).toEqual(['options.synthesisModel must be a "provider/model" string; ignoring it'])
 })

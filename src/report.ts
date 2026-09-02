@@ -1,11 +1,12 @@
 import { budgetExceeded, overrideFor } from "./budget.js"
-import type { RunRecord, TaskRecord, WorkflowSpec } from "./types.js"
+import type { RoundRecord, RunRecord, TaskRecord, WorkflowSpec } from "./types.js"
 
 /** A plain-text outline of the phases and tasks the workflow will run. */
 export function renderSpecTree(spec: WorkflowSpec): string {
   const lines = [`workflow: ${spec.name}`, `goal: ${spec.goal}`, `budget: ${renderBudget(spec)}`]
   for (const phase of spec.phases) {
-    lines.push(`${phase.id} [${phase.strategy}]${phase.title ? ` ${phase.title}` : ""}`)
+    const repeat = phase.repeat ? ` repeat gate=${phase.repeat.gate} maxRounds=${phase.repeat.maxRounds}` : ""
+    lines.push(`${phase.id} [${phase.strategy}]${phase.title ? ` ${phase.title}` : ""}${repeat}`)
     for (const task of phase.tasks) {
       const parts: string[] = [task.kind]
       if (task.agent) parts.push(`agent=${task.agent}`)
@@ -56,9 +57,12 @@ export function renderStatus(run: RunRecord): string {
     `usage: ${renderUsage(run)}`,
   ]
   if (run.error) lines.push(`error: ${run.error}`)
-  for (const phase of run.phases) {
-    lines.push(`${phase.id} [${phase.status}]${phase.error ? ` ${phase.error}` : ""}`)
+  for (const [index, phase] of run.phases.entries()) {
+    const repeat = run.spec.phases[index]?.repeat
+    const round = repeat ? ` round ${phase.round ?? 1}/${repeat.maxRounds}` : ""
+    lines.push(`${phase.id} [${phase.status}]${round}${phase.error ? ` ${phase.error}` : ""}`)
     for (const task of phase.tasks) lines.push(`  - ${renderTask(task)}`)
+    for (const finished of phase.rounds ?? []) lines.push(`  round ${finished.round}: ${describeRound(finished)}`)
     if (phase.synthesis) lines.push(`  synthesis [${phase.synthesis.status}]`)
   }
   lines.push(nextAction(run))
@@ -127,6 +131,21 @@ export function renderFinalReport(run: RunRecord): string {
   if (failed.length === 0) lines.push("  - none")
   lines.push("")
 
+  for (const [index, phase] of run.phases.entries()) {
+    const repeat = run.spec.phases[index]?.repeat
+    const rounds = phase.rounds ?? []
+    const last = rounds.at(-1)
+    if (!repeat || !last) continue
+    lines.push(
+      `Gate ${repeat.gate} of phase ${phase.id}: ${describeRound(last)} after ${rounds.length} of ${repeat.maxRounds} rounds.`,
+    )
+    // The findings were written by the gate member, so they travel as data as well.
+    if (last.approved !== true && last.findings.length > 0) {
+      lines.push(wrapUntrusted("gate", repeat.gate, clip(last.findings.join("\n"), REPORT_LIMIT)))
+    }
+    lines.push("")
+  }
+
   for (const phase of run.phases) {
     if (phase.synthesis?.status !== "completed" || !phase.synthesis.output) continue
     // The synthesis was written by a model over member output, so it is data as well.
@@ -159,6 +178,13 @@ export function renderProgress(run: RunRecord, maxLines: number): string {
   const lines = renderStatus(run).split("\n")
   if (lines.length <= maxLines) return lines.join("\n")
   return [...lines.slice(0, maxLines - 1), `[${lines.length - maxLines + 1} more lines; use workflow_status]`].join("\n")
+}
+
+/** What one finished round of a `repeat` phase came to, as one line. */
+function describeRound(round: RoundRecord): string {
+  if (round.approved === true) return "approved"
+  if (round.approved === false) return `not approved (${round.findings.length} findings)`
+  return "gate did not complete"
 }
 
 function isFailure(task: TaskRecord): boolean {

@@ -46,6 +46,7 @@ resolved options, and the model loads it when what you ask for splits into parts
 |----------|--------------|
 | "Read each of the three SDK clients and tell me where they diverge." | The model loads the `workflow` skill, writes one `parallel` phase with one task per client and a `synthesisPrompt`, calls `workflow_run`, prints the run id and the task tree, and stops. The report arrives on its own when the run ends. |
 | "/workflow migrate the Android app to Compose Navigation, in stages" | The command puts an authoring prompt in the session. The model writes a `sequential` spec, shows it, calls `workflow_run`, and reports the run id. |
+| "Add a --json flag to the CLI, and have it reviewed." | The model calls `workflow_run_saved` with the built-in `build-review` and that goal. A worktree task makes the change, a `reviewer` judges the patch, and a round it refuses runs again. See "Built-in workflows". |
 | "how's it going?" while a run is live | The lead already carries the progress tree, so it answers in three lines with no tool call. Any other session calls `workflow_status`. |
 
 The skill costs one short listing entry per session. The host fetches its body only on the
@@ -56,6 +57,8 @@ turn the model loads it.
 | Option | Type | Default | Notes |
 |--------|------|---------|-------|
 | `defaultAgent` | string | `"general"` | The agent a task uses when it names none. Must be a subagent-mode agent. |
+| `roles` | object | `{}` | The model and the agent of every role. See "Roles" below. |
+| `synthesisModel` | string | — | The model a phase synthesis runs on, as `provider/model` or `provider/model#variant`. Without one the catalog default is used. |
 | `concurrency` | integer | `4` | Tasks of one phase running at the same time. Clamped to 1..16. |
 | `maxAgents` | integer | `100` | The ceiling on the number of tasks in one workflow. Clamped to 1..1000. |
 | `mailboxMaxMessages` | integer | `20` | The message cap a team phase gets when its spec sets none. Clamped to 1..50. |
@@ -67,18 +70,54 @@ turn the model loads it.
 An invalid value logs a warning and falls back to the default. The plugin still loads. Run
 `workflow_doctor` to see the values in use and the warnings.
 
+### Roles
+
+The plugin registers one subagent per role: `reviewer`, `security-reviewer`, `researcher`,
+and `stakeholder`. A task names one the way it names any other agent, with `"agent":
+"reviewer"`. Every role is read-only: it may not edit, spawn, or stop to ask a question.
+
+A role runs on the model of the session that spawned it unless the options give it one.
+`task.model` stays rejected; the model of a role belongs in the options:
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "/absolute/path/to/oc-dynamic-workflows",
+      "options": {
+        "roles": {
+          "reviewer": { "model": "anthropic/claude-opus-4-1#thinking" },
+          "researcher": { "agent": "explore" }
+        },
+        "synthesisModel": "anthropic/claude-haiku-4-5"
+      }
+    }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `roles.<role>.model` | string | `provider/model` or `provider/model#variant`. The model that role runs on. |
+| `roles.<role>.agent` | string | Use this agent instead of the one the plugin registers. The plugin then registers no agent for that role and sets no model on yours. |
+
+An unknown role name, a model that is not `provider/model`, or a value of the wrong type
+becomes a warning and is dropped; the other roles are kept. A user `agents:` entry of the
+same name is applied after this plugin, so it overrides any field of a registered role.
+Run `workflow_doctor` to see which agent and which model each role resolved to.
+
 ## Tools
 
 | Tool | Input | Result |
 |------|-------|--------|
-| `workflow_run` | `spec` (object or JSON string) or `specRef` (a saved name) | The run id and the task tree, or the errors |
-| `workflow_run_saved` | `name` | The same, for a saved workflow |
+| `workflow_run` | `spec` (object or JSON string), or `specRef` (a saved or a built-in name) with `goal?` | The run id and the task tree, or the errors |
+| `workflow_run_saved` | `name`, `goal?` | The same, for a saved or a built-in workflow |
 | `workflow_status` | `runId` (optional) | The progress tree of that run, or of the most recent one |
 | `workflow_cancel` | `runId` or `taskId` | Interrupts the member sessions and marks the run cancelled |
 | `workflow_resume` | `runId`, `overrides?` | Starts what a run has left, under the same run id |
-| `workflow_list` | — | The saved workflow names |
-| `workflow_show` | `name` | The JSON of one saved workflow |
-| `workflow_doctor` | — | The health of the engine: executor, default agent, whether the permission classifier plugin is loaded, option warnings, saved specs that do not parse, runs still marked running, and the storage key prefix |
+| `workflow_list` | — | The saved workflow names and the built-in ones. `builtin` names the built-ins no saved file shadows |
+| `workflow_show` | `name` | The JSON of one saved or built-in workflow |
+| `workflow_doctor` | — | The health of the engine: executor, default agent, the agent and the model of every role, the synthesis model, whether the permission classifier plugin is loaded, option warnings, saved specs that do not parse, runs still marked running, and the storage key prefix |
 | `team_send` | `type`, `body`, `ref?` | Members only: sends one message to the lead of the run |
 | `team_steer` | `taskId`, `body`, `force?` | Leads only: sends one instruction to a member |
 | `team_inbox` | `runId?` | Leads only: the unread mail, marked read, plus the roster |
@@ -109,7 +148,10 @@ The prompt a goal produces carries the same spec summary the tools carry, plus t
 defaults to use: a `parallel` phase for tasks that do not need each other, a `sequential`
 phase when a task needs the result of the one before it, a `team` phase only when the
 members have to ask questions while they work, `retries: 1`, no `model`, and
-`isolation: "worktree"` only for a task that edits files.
+`isolation: "worktree"` only for a task that edits files. It also says to put a reviewer
+gate after an editing task, to use only the read-only roles and no shell or worktree task
+when the calling agent may not edit, and to prefer a built-in workflow for a build or a
+plan goal.
 
 ## Spec
 
@@ -172,6 +214,9 @@ more than one field, which the plugin reports when the spec is run:
 - `prompt` is required for an `agent` task, `command` for a `shell` one.
 - `keep` needs `isolation: "worktree"`.
 - `mailbox` is only allowed on a `team` phase.
+- `repeat` is only allowed on a `sequential` phase, and its `gate` must be the last task of
+  that phase, with at least one task before it and an `outputSchema` that requires
+  `approved`.
 - `budget` needs `usd`, `tokens`, or both.
 - `task.model` is rejected in version 1.
 - The task count and the `shellTasks` and `worktrees` switches come from the plugin options.
@@ -193,6 +238,7 @@ missing one in: a spec written in an editor should carry them.
 | `strategy` | phase | `sequential`, `parallel`, or `team`. Default `parallel`. `type` is accepted as an alias. |
 | `synthesisPrompt` | phase | Optional. Joins the outputs of the phase into one summary. |
 | `mailbox` | phase | Only on a `team` phase. `{ "maxMessages": 20 }`, 1 to 50. |
+| `repeat` | phase | Only on a `sequential` phase. `{ "gate": "<task id>", "maxRounds": 1-5 }`. See below. |
 | `kind` | task | `agent` (default) or `shell`. |
 | `prompt` | task | Required when `kind` is `agent`. |
 | `command` | task | Required when `kind` is `shell`. |
@@ -205,7 +251,8 @@ missing one in: a spec written in an editor should carry them.
 
 ### Not supported in version 1
 
-- `task.model` — set the model on the agent instead.
+- `task.model` — set the model on the agent instead, or use a role and set
+  `roles.<role>.model` in the plugin options.
 - `mailbox.peers: true`.
 
 ### Worktree isolation
@@ -233,6 +280,13 @@ touching the working tree the user is in.
 5. The worktree is then removed, unless the task set `"keep": true`, and the run's own
    directory goes with the last worktree in it. A retry gets a fresh one and overwrites the
    patch.
+6. In a `sequential` phase the next task is told what the earlier worktree tasks of that
+   phase changed, under "Edits of the earlier worktree tasks of this phase, saved as
+   patches:". Each one is an `<untrusted source="worktree" id="<taskId>">` envelope with the
+   patch path, or `no changes`, the kept path when the task set `"keep": true`, and the stat.
+   That is enough to read the patch or to run `git apply --check` on it. A task of the phase
+   that is not listed there edited the checkout directly, and the prompt says so. A
+   `parallel` phase passes nothing on, because the order of the results is not fixed.
 
 Two things follow from starting at `HEAD`:
 
@@ -244,6 +298,64 @@ Two things follow from starting at `HEAD`:
   directory it was started from, whichever instance happened to build that engine first.
 
 Set `"worktrees": false` in the plugin options to reject a spec that asks for one.
+
+### Review gates (`repeat`)
+
+A `sequential` phase can carry `"repeat": { "gate": "<task id>", "maxRounds": 3 }`. The gate
+is the last task of the phase. It reviews the work of the tasks in front of it and answers
+with one JSON object, so it needs an `outputSchema` that requires `approved`:
+
+```json
+{
+  "id": "build",
+  "strategy": "sequential",
+  "repeat": { "gate": "review", "maxRounds": 3 },
+  "tasks": [
+    { "id": "impl", "prompt": "Implement the goal. Reply with what you changed and how you verified it.", "isolation": "worktree", "retries": 1 },
+    {
+      "id": "review",
+      "agent": "reviewer",
+      "prompt": "Review the patch of task impl against the goal. Reply with one JSON object.",
+      "outputSchema": {
+        "type": "object",
+        "required": ["approved"],
+        "properties": {
+          "approved": { "type": "boolean" },
+          "findings": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  ]
+}
+```
+
+One pass of the phase is a round.
+
+1. The phase runs in order, as any `sequential` phase does.
+2. The gate's answer is read off the task record: `approved`, and `findings` or `gaps` as
+   the list of what is missing. The round goes on the run record with its verdict.
+3. `"approved": true` ends the loop. So does a gate that did not complete, `maxRounds`, a
+   cancel, the run clock, and the budget cap.
+4. Otherwise every task of the phase goes back to `pending` and the phase runs again. The
+   prompt of the new round starts with `Round N of M. The gate task did not approve round
+   N-1. Address every finding:` and the findings in an `<untrusted source="agent">`
+   envelope.
+
+The synthesis of the phase runs once, after the last round.
+
+A phase whose gate never approves still joins as `completed` when every one of its tasks
+completed. The status line (`round 2/3`, one line per finished round) and the final report
+(`Gate review of phase build: not approved (2 findings) after 3 of 3 rounds.`) are how the
+lead learns the verdict.
+
+Two things to know before you set `maxRounds`:
+
+- A round of a worktree task starts from a fresh worktree of `HEAD`, and its settle
+  overwrites `.opencode/workflows/runs/<runId>/<taskId>.patch`. The prompt of the next round
+  therefore tells the member to `git apply` the patch of the last one before it works, and
+  only the newest patch is kept on disk.
+- `maxAgents` counts the tasks of the spec, not the rounds. A repeat phase can spawn up to
+  `maxRounds` times its tasks, so bound it with a `budget` when the cost matters.
 
 ### Task output schema
 
@@ -262,6 +374,64 @@ The plugin reads only these JSON Schema keywords and ignores anything else in th
 | `items` | Checked for every element of an array. |
 | `enum` | The value must equal one of the listed values. |
 | `additionalProperties` | Only `false` has an effect: a key the schema does not name is an error. |
+
+## Plan mode
+
+A lead that may not edit files may not have its members edit for it. `workflow_run`,
+`workflow_run_saved`, and `workflow_resume` read the permission rules of the calling
+session's agent before they start anything. When that agent denies `edit`, as core's `plan`
+and `explore` agents do, every task of the spec that can change files is named and the call
+is refused:
+
+- `"kind": "shell"`, which runs a command outside the permission rules;
+- `"isolation": "worktree"`, which checks the repository out to edit it;
+- a task on an agent whose rules do not deny `edit`, including an agent the host does not
+  list.
+
+```
+your agent "plan" cannot edit, so this run may not edit either:
+  - build/impl: isolation: "worktree" checks the repository out to edit it; agent "general" may edit
+  - build/run: kind: "shell" runs a command outside the permission rules
+  - use a read-only role (reviewer, security-reviewer, researcher, stakeholder) or explore, and drop the shell and worktree tasks
+```
+
+Nothing is spawned and no run record is written. A spec whose tasks all name a read-only
+role starts under a plan-mode lead the way it does under any other agent.
+
+An agent the host does not list has no rules, which reads as no policy: a lead on such an
+agent is never stopped. The rules are read from the agent of the session that calls, so a
+`workflow_resume` from a plan-mode session is refused for a run an editing lead started.
+
+## Built-in workflows
+
+Three workflows ship with the plugin. They need no file in the project, and each one takes
+its goal from the call instead of from a spec:
+
+```js
+await tools.workflow_run_saved({ name: "build-review", goal: "Add a --json flag to the CLI." })
+```
+
+| Name | What it runs | Edits files |
+|------|--------------|-------------|
+| `build-review` | One `sequential` phase: `impl` in a worktree, then a `reviewer` gate. `maxRounds: 3`. | yes |
+| `secure-build` | One `sequential` phase: `impl` in a worktree, a `reviewer`, then a `security-reviewer` gate that folds the completeness verdict in. `maxRounds: 3`. | yes |
+| `plan-research` | A `parallel` phase of three `researcher` tasks with a synthesis, then a `sequential` phase: `draft` and a `stakeholder` gate. `maxRounds: 2`. | no |
+
+- A built-in without a `goal` is refused with `the built-in workflow "<name>" needs a goal;
+  pass "goal" with what it should do`. Nothing is spawned.
+- Every task carries `retries: 1`. No built-in sets a `budget`; pass
+  `overrides.maxCostUsd` or `overrides.maxTokens` when the cost matters.
+- Each gate uses the `outputSchema` the engine reads its verdict from, and each role task
+  names the agent `roles.<role>.agent` resolved to, so a role you point at another agent is
+  used here as well.
+- A file at `<project>/.opencode/workflows/<name>.json` shadows the built-in of that name.
+  `workflow_list` then lists the file and drops the built-in from `builtin`.
+- `goal` works with a saved file too, where it replaces the goal that file holds.
+- `plan-research` holds no shell and no worktree task, and every one of its tasks runs on a
+  read-only role, so it starts under a plan-mode lead. The two build workflows do not. See
+  "Plan mode".
+- `workflow_show` prints a built-in with `"goal": "<the goal you pass to
+  workflow_run_saved>"`, which is a stand-in; the plugin substitutes nothing.
 
 ## Saved workflows
 
@@ -291,13 +461,15 @@ hand. A name may only contain letters, digits, `.`, `_`, and `-`.
    `opencode-permissions-classifier` plugin active, an ask it allows or denies is answered
    before you see it and never reaches the run record; `workflow_doctor` reports whether
    that plugin is loaded.
-6. When a phase sets `synthesisPrompt`, the outputs of the phase are joined into one
+6. A `sequential` phase that sets `repeat` runs again until its gate task approves the
+   round, at most `maxRounds` times. See "Review gates".
+7. When a phase sets `synthesisPrompt`, the outputs of the phase are joined into one
    summary by a transient generation. Only that summary travels to the later phases.
-7. A run that passes `maxRunMinutes` drops the remaining work and ends as `partial`.
-8. A `team` phase runs like a `parallel` one and opens the mailbox for its tasks. See
+8. A run that passes `maxRunMinutes` drops the remaining work and ends as `partial`.
+9. A `team` phase runs like a `parallel` one and opens the mailbox for its tasks. See
    "Team phases" below.
-9. A run that spends its `budget` stops there and ends as `partial`. See "Budgets".
-10. When the run ends, the calling session receives a message with the final report: the
+10. A run that spends its `budget` stops there and ends as `partial`. See "Budgets".
+11. When the run ends, the calling session receives a message with the final report: the
     status, the completed and failed lists, the summaries, the outputs, the usage, and what
     to do next. A run that did not complete says to use `workflow_resume`.
 
@@ -351,6 +523,10 @@ cap for one run without editing the spec.
 A phase whose tasks all completed, and whose synthesis completed with them, is kept whole
 and skipped. Any other phase runs again, and its synthesis is written again, because a
 summary of a part of a phase would be wrong.
+
+A `repeat` phase is the one exception: when its last round ended without an approval and it
+has rounds left, the resume starts the next round instead of keeping the phase. A phase the
+stop cut in the middle of a round resumes in that round, with its completed tasks kept.
 
 The prompt of a task that runs again is rebuilt from the record: the summaries of the
 earlier phases, and, in a `sequential` phase, the stored outputs of the earlier tasks of
@@ -408,6 +584,8 @@ The calling session is not woken. `workflow_status` on such a run ends with
 - **No scripts in a spec.** A spec holds prompts and shell commands. Nothing in it is
   evaluated as code by the plugin.
 - **No nested workflows.** A member session cannot start, resume, or cancel a run.
+- **No editing under a read-only lead.** A lead whose agent denies `edit` cannot start or
+  resume a run whose tasks can change files. See "Plan mode".
 - **Shell tasks bypass the permission rules.** See "Shell tasks" below.
 
 ## Team phases

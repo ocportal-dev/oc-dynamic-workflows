@@ -289,3 +289,82 @@ it("rejects an unknown key of the workflow and lists the valid ones", () => {
   expect(messages).toContain('unknown key "retries"')
   expect(messages).toContain("specVersion, name, goal, budget, phases")
 })
+
+/** The gate task of the example: an agent task whose schema requires "approved". */
+const gateTask = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: "review",
+  agent: "reviewer",
+  prompt: "review it",
+  outputSchema: { type: "object", required: ["approved"], properties: { approved: { type: "boolean" } } },
+  ...overrides,
+})
+
+/** A sequential phase with a work task and a gate, which is what `repeat` allows. */
+const gateSpec = (phase: Record<string, unknown> = {}): Record<string, unknown> =>
+  spec({
+    phases: [
+      {
+        id: "build",
+        strategy: "sequential",
+        repeat: { gate: "review", maxRounds: 3 },
+        tasks: [{ id: "impl", prompt: "build it" }, gateTask()],
+        ...phase,
+      },
+    ],
+  })
+
+it("accepts a repeat gate", async () => {
+  const workflow = parsed(await fixture("gate"))
+  expect(workflow.phases[0]!.repeat).toEqual({ gate: "review", maxRounds: 3 })
+})
+
+it("rejects a repeat on a phase that is not sequential", () => {
+  expect(errors(gateSpec({ strategy: "parallel" }))).toEqual([
+    'phases[0].repeat: only a phase with strategy "sequential" can repeat',
+  ])
+})
+
+it("rejects a gate that names no task of the phase", () => {
+  expect(errors(gateSpec({ repeat: { gate: "nope", maxRounds: 2 } }))).toEqual([
+    'phases[0].repeat.gate: no task "nope" in this phase',
+  ])
+})
+
+it("rejects a gate that is not the last task of the phase", () => {
+  expect(errors(gateSpec({ tasks: [gateTask(), { id: "impl", prompt: "build it" }] }))).toEqual([
+    "phases[0].repeat.gate: the gate has to be the last task of the phase",
+  ])
+})
+
+it("rejects a phase whose only task is the gate", () => {
+  expect(errors(gateSpec({ tasks: [gateTask()] }))).toEqual([
+    "phases[0].repeat.gate: the phase needs at least one task before the gate",
+  ])
+})
+
+it("rejects a gate that does not answer with an approved flag", () => {
+  expect(errors(gateSpec({ tasks: [{ id: "impl", prompt: "build it" }, gateTask({ outputSchema: undefined })] }))).toEqual(
+    ['phases[0].repeat.gate: the gate has to be an agent task whose outputSchema requires "approved"'],
+  )
+  expect(
+    errors(gateSpec({ tasks: [{ id: "impl", prompt: "build it" }, { id: "review", kind: "shell", command: "true" }] })),
+  ).toEqual(['phases[0].repeat.gate: the gate has to be an agent task whose outputSchema requires "approved"'])
+})
+
+it("rejects a maxRounds outside the range", () => {
+  expect(errors(gateSpec({ repeat: { gate: "review", maxRounds: 6 } })).join("\n")).toContain(
+    "phases[0].repeat.maxRounds:",
+  )
+})
+
+it("names maxRounds for an unknown key of a repeat", () => {
+  expect(errors(gateSpec({ repeat: { gate: "review", maxRound: 3 } })).join("\n")).toContain(
+    'unknown key "maxRound"; did you mean "maxRounds"?',
+  )
+})
+
+it("names repeat among the phase keys of an unknown one", () => {
+  expect(errors(spec({ phases: [{ id: "one", repeatt: {}, tasks: [{ id: "a", prompt: "go" }] }] })).join("\n")).toContain(
+    'did you mean "repeat"?',
+  )
+})

@@ -1,3 +1,4 @@
+import { ROLE_NAMES } from "./config.js"
 import { z } from "zod"
 import type { WorkflowSpec } from "./types.js"
 
@@ -16,9 +17,12 @@ export const DSL = [
   'A spec is JSON with "specVersion": 1, "name", "goal", and "phases".',
   'A phase has "id", "strategy" ("sequential", "parallel", or "team"), "tasks", and an optional "synthesisPrompt".',
   'A task has "id", "kind" ("agent" with a "prompt", or "shell" with a "command"), and optional "agent", "retries" (0-3), "timeoutMs", "outputSchema", "isolation", and "keep".',
-  'Set the model on the agent: "model" on a task is rejected.',
+  'Set the model on the agent: "model" on a task is rejected. A role takes its model from the plugin options.',
+  `The plugin registers one read-only agent per role: ${ROLE_NAMES.join(", ")}. Name one with "agent" on a task; it reads and reports and never edits.`,
   '"isolation": "worktree" runs the task in its own git worktree of HEAD; edits are saved as a patch and the worktree is removed unless "keep": true.',
+  'A "sequential" phase can carry "repeat": { "gate": <task id>, "maxRounds": 1-5 }: the gate is the last task of the phase and answers one JSON object with "approved" and "findings"; a round the gate refuses runs the whole phase again with the findings in the prompt.',
   'A "team" phase runs like "parallel" and opens the mailbox: its members use team_send, and you use team_steer and team_inbox.',
+  'Three workflows are built in: build-review, secure-build, and plan-research. Run one with workflow_run_saved, a "name" and a "goal", instead of writing a spec for a build or a plan.',
 ].join("\n")
 
 const Budget = z
@@ -51,6 +55,11 @@ const Mailbox = z.strictObject({
   maxMessages: z.number().int().min(1).max(50).default(20),
 })
 
+const Repeat = z.strictObject({
+  gate: z.string().min(1),
+  maxRounds: z.number().int().min(1).max(5),
+})
+
 const Phase = z.strictObject({
   id: z.string().min(1),
   title: z.string().optional(),
@@ -58,7 +67,24 @@ const Phase = z.strictObject({
   tasks: z.array(Task).min(1),
   synthesisPrompt: z.string().optional(),
   mailbox: Mailbox.optional(),
+  repeat: Repeat.optional(),
 })
+
+/**
+ * What the gate of a `repeat` phase has to answer with.
+ *
+ * Exported so a spec that is built in code uses the same schema the runner reads the
+ * verdict out of: `approved`, plus the findings a round that was refused has to fix.
+ */
+export const GATE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  required: ["approved"],
+  properties: {
+    approved: { type: "boolean" },
+    findings: { type: "array", items: { type: "string" } },
+    gaps: { type: "array", items: { type: "string" } },
+  },
+}
 
 /**
  * The base object, exported so `scripts/schema.ts` can generate the JSON Schema asset.
@@ -88,6 +114,7 @@ function workflowSchema(limits: SpecLimits) {
           message: 'only a phase with strategy "team" can have a mailbox',
         })
       }
+      if (phase.repeat) checkRepeat(phase, phase.repeat, phaseIndex, ctx)
 
       for (const [taskIndex, task] of phase.tasks.entries()) {
         total += 1
@@ -147,6 +174,56 @@ function workflowSchema(limits: SpecLimits) {
       })
     }
   })
+}
+
+/** The issue sink of `superRefine`, reduced to the one call the checks below make. */
+interface IssueSink {
+  addIssue: (issue: { code: "custom"; path: (string | number)[]; message: string }) => void
+}
+
+/**
+ * The rules of a `repeat` phase.
+ *
+ * The loop only means something when the last task of the phase judges the work before
+ * it: the gate has to be that task, it has to answer with `approved`, and there has to be
+ * work in front of it to run again.
+ */
+function checkRepeat(
+  phase: z.infer<typeof Phase>,
+  repeat: z.infer<typeof Repeat>,
+  phaseIndex: number,
+  ctx: IssueSink,
+): void {
+  const at = (field?: string): (string | number)[] =>
+    field ? ["phases", phaseIndex, "repeat", field] : ["phases", phaseIndex, "repeat"]
+
+  if (phase.strategy !== "sequential") {
+    ctx.addIssue({ code: "custom", path: at(), message: 'only a phase with strategy "sequential" can repeat' })
+  }
+
+  const index = phase.tasks.findIndex((task) => task.id === repeat.gate)
+  if (index < 0) {
+    ctx.addIssue({ code: "custom", path: at("gate"), message: `no task "${repeat.gate}" in this phase` })
+    return
+  }
+  if (index !== phase.tasks.length - 1) {
+    ctx.addIssue({ code: "custom", path: at("gate"), message: "the gate has to be the last task of the phase" })
+    return
+  }
+  if (index === 0) {
+    ctx.addIssue({ code: "custom", path: at("gate"), message: "the phase needs at least one task before the gate" })
+    return
+  }
+
+  const gate = phase.tasks[index]!
+  const required = gate.outputSchema?.required
+  if (gate.kind !== "agent" || !Array.isArray(required) || !required.includes("approved")) {
+    ctx.addIssue({
+      code: "custom",
+      path: at("gate"),
+      message: 'the gate has to be an agent task whose outputSchema requires "approved"',
+    })
+  }
 }
 
 /**
@@ -249,7 +326,7 @@ function alias(source: Record<string, unknown>, map: Record<string, string>): Re
 const KEYS = {
   workflow: ["specVersion", "name", "goal", "budget", "phases"],
   budget: ["usd", "tokens"],
-  phase: ["id", "title", "strategy", "tasks", "synthesisPrompt", "mailbox"],
+  phase: ["id", "title", "strategy", "tasks", "synthesisPrompt", "mailbox", "repeat"],
   task: [
     "id",
     "description",
@@ -264,6 +341,7 @@ const KEYS = {
     "outputSchema",
   ],
   mailbox: ["peers", "maxMessages"],
+  repeat: ["gate", "maxRounds"],
 }
 
 function formatIssue(issue: z.core.$ZodIssue): string {
@@ -288,6 +366,7 @@ function keysAt(path: ReadonlyArray<PropertyKey>): string[] {
   if (path.length === 0) return KEYS.workflow
   if (last === "budget") return KEYS.budget
   if (last === "mailbox") return KEYS.mailbox
+  if (last === "repeat") return KEYS.repeat
   if (path[path.length - 2] === "tasks") return KEYS.task
   if (path[path.length - 2] === "phases") return KEYS.phase
   return KEYS.workflow

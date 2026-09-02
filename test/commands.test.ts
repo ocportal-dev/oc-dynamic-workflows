@@ -101,3 +101,15 @@ it("swallows a session.prompt that rejects", async () => {
   }
   expect(fake.prompts).toHaveLength(0)
 })
+
+it("names the gate, the read-only roles, and the built-in workflows in the authoring prompt", async () => {
+  const fake = await startPlugin()
+  await fake.slash("workflow", "add a --json flag to the CLI")
+
+  const [sent] = fake.prompts
+  expect(sent!.text).toContain("Put a reviewer gate after an editing task")
+  expect(sent!.text).toContain("When your own agent may not edit files, use only the read-only roles")
+  expect(sent!.text).toContain("reviewer, security-reviewer, researcher, stakeholder")
+  expect(sent!.text).toContain("build-review, secure-build, plan-research")
+  expect(sent!.text).toContain("workflow_run_saved")
+})
