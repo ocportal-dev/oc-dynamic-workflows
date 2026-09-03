@@ -6,7 +6,9 @@
  * is checked here. Only these keywords are read: `type`, `properties`, `required`,
  * `items`, `enum`, and `additionalProperties`. Anything else in the schema is ignored.
  */
-export type ExtractResult = { ok: true; value: Record<string, unknown> } | { ok: false; error: string }
+export type ExtractResult =
+  /** `text` is the matched slice as it stood in the output, so a caller can quote it verbatim. */
+  { ok: true; value: Record<string, unknown>; text: string } | { ok: false; error: string }
 
 /** Finds the first JSON object in the text, fenced or bare. */
 export function extractJson(text: string): ExtractResult {
@@ -14,7 +16,7 @@ export function extractJson(text: string): ExtractResult {
     try {
       const parsed: unknown = JSON.parse(candidate)
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return { ok: true, value: parsed as Record<string, unknown> }
+        return { ok: true, value: parsed as Record<string, unknown>, text: candidate }
       }
     } catch {
       // Not the object; keep looking.

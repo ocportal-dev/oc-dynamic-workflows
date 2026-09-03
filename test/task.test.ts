@@ -121,6 +121,91 @@ it("names the field that does not match the schema", async () => {
   expect(task.status).toBe("failed")
   expect(task.error).toContain("$.word: must be string, not number")
   expect(task.error).toContain("$.extra: not allowed")
+  // The candidate is quoted as the member wrote it, spacing and all, not re-serialized:
+  // `JSON.stringify` of the same value would read `{"word":7,"extra":true}`.
+  expect(task.error).toContain('the JSON object read was: {"word": 7, "extra": true}')
+  await fake.stop()
+})
+
+it("quotes at most the first 200 characters of the object it read", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: WORD_SCHEMA }]),
+    START,
+  )
+  const answer = JSON.stringify({ count: 1, filler: "y".repeat(400) })
+  ;(await waitForSpawn(fake, 1)).settle(answer)
+  await fake.runner.wait(runId)
+
+  const task = (await fake.store.get(runId))!.phases[0]!.tasks[0]!
+  expect(task.status).toBe("failed")
+  const quoted = task.error!.slice(task.error!.indexOf("the JSON object read was: ") + "the JSON object read was: ".length)
+  expect(quoted).toBe(answer.slice(0, 200))
+  // A plain slice, so no cut marker is appended the way `clip` would.
+  expect(quoted).not.toContain("[cut at")
+  await fake.stop()
+})
+
+// No `additionalProperties: false`: the padding that pushes the answer past OUTPUT_LIMIT is
+// an undeclared key, and that flag would fail it for a reason that has nothing to do with
+// the clipping this pair of tests covers.
+const FINDINGS_SCHEMA = {
+  type: "object",
+  required: ["findings"],
+  properties: { findings: { type: "array", items: { type: "string" } } },
+}
+/**
+ * Longer than OUTPUT_LIMIT (8000), so a check that read `task.output` would see it cut.
+ *
+ * `detail` is the nested object the live failure hit: once the outer braces are unbalanced,
+ * `extractJson` matches it instead and the task fails with `$.findings: required`, even
+ * though the member answered correctly.
+ */
+const LONG_ANSWER = JSON.stringify({ findings: ["ok"], detail: { note: "nested" }, padding: "x".repeat(9000) })
+
+it("validates the raw answer of a foreground task, not the clipped output", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: FINDINGS_SCHEMA }]),
+    START,
+  )
+  ;(await waitForSpawn(fake, 1)).settle(LONG_ANSWER)
+  await fake.runner.wait(runId)
+
+  const task = (await fake.store.get(runId))!.phases[0]!.tasks[0]!
+  expect(task.attempts).toBe(1)
+  expect(task.error).toBeUndefined()
+  expect(task.status).toBe("completed")
+  expect(task.data?.findings).toEqual(["ok"])
+  expect(task.output!.length).toBeLessThan(LONG_ANSWER.length)
+  await fake.stop()
+})
+
+it("validates the raw answer of a backgrounded task, not the clipped output", async () => {
+  const fake = startRunner({ pollIntervalMs: 5 })
+  const runId = await fake.runner.start(
+    sequential([{ id: "a", kind: "agent", prompt: "reply in json", retries: 0, keep: false, outputSchema: FINDINGS_SCHEMA }]),
+    START,
+  )
+  const spawn = await waitForSpawn(fake, 1)
+  fake.messages.set(spawn.childID, [
+    { id: "msg_1", type: "user", content: [] },
+    { id: "msg_2", type: "assistant", content: [{ type: "text", text: LONG_ANSWER }] },
+  ])
+
+  spawn.background()
+  await tick(2)
+  fake.sessions.get(spawn.childID)!.outcome = "succeeded"
+  await fake.runner.wait(runId)
+
+  const task = (await fake.store.get(runId))!.phases[0]!.tasks[0]!
+  expect(task.attempts).toBe(1)
+  expect(task.error).toBeUndefined()
+  expect(task.status).toBe("completed")
+  expect(task.data?.findings).toEqual(["ok"])
+  expect(task.output!.length).toBeLessThan(LONG_ANSWER.length)
+  // A schema failure interrupts the member; an empty list proves that path was never taken.
+  expect(fake.interrupts).toEqual([])
   await fake.stop()
 })
 

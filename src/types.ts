@@ -63,7 +63,10 @@ export interface TaskRecord {
   /** The child session id, learned from `session.created` or from the executor result. */
   sessionID?: string
   attempts: number
-  /** Clipped: 4000 characters in-phase, 1000 across phases. */
+  /**
+   * Clipped to OUTPUT_LIMIT (8000) when stored. Schema validation reads the raw response,
+   * not this text.
+   */
   output?: string
   /** The task output after `outputSchema` validation. */
   data?: Record<string, unknown>

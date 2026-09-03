@@ -77,6 +77,23 @@ export type ResumeResult = { ok: true; run: RunRecord; ignoredGuidance?: string[
 const CONTEXT_LIMIT = 4000
 const CROSS_PHASE_LIMIT = 1000
 const OUTPUT_LIMIT = 8000
+/**
+ * How much of a raw member answer `outputSchema` validation reads.
+ *
+ * `task.output` is clipped to `OUTPUT_LIMIT`, and a clipped JSON answer is broken: the outer
+ * object loses its closing brace, so `extractJson` matches a nested object instead and the
+ * task fails on a field the member did in fact send. Validation therefore reads the raw
+ * answer, not the stored one. It still needs a bound, because `extractJson` scans from every
+ * `{` and is quadratic in the worst case, so an unbounded brace-heavy answer would block the
+ * event loop of the opencode process. 256 KB bounds that while accepting every realistic
+ * schema answer.
+ *
+ * `task.data` therefore holds the full parsed object, which can be larger than
+ * `OUTPUT_LIMIT`, and every transition writes the record to storage and to the JSON mirror.
+ * The consumers are bounded already: `readVerdict` clips findings to `FINDING_LIMIT`, and
+ * `report.ts` never prints `data`.
+ */
+const VALIDATE_LIMIT = 262_144
 const POLL_MS = 2000
 /**
  * How long a member may look interrupted after a forced steer.
@@ -1021,6 +1038,8 @@ export class Runner {
     // The warm-up and the move come out of the task's own clock.
     const settled = await race(handle.promise, Math.max(timeoutMs - (this.#now() - startedAt), 0))
     let status: TaskRecord["status"]
+    // The unclipped answer, kept for the schema check. `task.output` stays clipped.
+    let raw = ""
     if (settled.type === "timeout") {
       const sessionID = live.sessionID ?? task.sessionID ?? (await this.#waitForChild(live, task))
       if (sessionID) {
@@ -1039,12 +1058,14 @@ export class Runner {
       const sessionID = live.sessionID ?? task.sessionID
       if (this.#forced.delete(`${run.runId}:${task.taskId}`) && sessionID) {
         // The steer ended the step, not the member. Watch the session out.
-        status = await this.#awaitBackground(
+        const watched = await this.#awaitBackground(
           sessionID,
           timeoutMs - (this.#now() - startedAt),
           task,
           this.#now() + FORCE_GRACE_MS,
         )
+        status = watched.status
+        raw = watched.raw
       } else {
         task.error = describe(settled.error)
         status = "failed"
@@ -1054,15 +1075,18 @@ export class Runner {
       task.sessionID = settled.value.sessionID
       live.sessionID = settled.value.sessionID
       this.#deps.roster.bind(run.runId, task.taskId, settled.value.sessionID)
-      status = await this.#awaitBackground(settled.value.sessionID, timeoutMs - (this.#now() - startedAt), task)
+      const watched = await this.#awaitBackground(settled.value.sessionID, timeoutMs - (this.#now() - startedAt), task)
+      status = watched.status
+      raw = watched.raw
     } else {
       task.sessionID = settled.value.sessionID
       this.#deps.roster.bind(run.runId, task.taskId, settled.value.sessionID)
-      task.output = clip(settled.value.output, OUTPUT_LIMIT)
+      raw = settled.value.output
+      task.output = clip(raw, OUTPUT_LIMIT)
       status = "completed"
     }
 
-    if (status === "completed" && spec.outputSchema) status = this.#checkSchema(spec.outputSchema, task)
+    if (status === "completed" && spec.outputSchema) status = this.#checkSchema(spec.outputSchema, task, raw)
 
     this.#deps.roster.forget(description)
     this.#live.get(run.runId)?.delete(task.taskId)
@@ -1255,13 +1279,17 @@ export class Runner {
    * session afterwards. A forced steer uses the same watch, and until
    * `ignoreInterruptedUntil` an `interrupted` outcome is the interrupt itself, not the end
    * of the member.
+   *
+   * The unclipped answer travels back with the status, because the caller runs the
+   * `outputSchema` check on it. `task.output` is clipped here, as it is on the foreground
+   * path.
    */
   async #awaitBackground(
     sessionID: string,
     timeoutMs: number,
     task: TaskRecord,
     ignoreInterruptedUntil = 0,
-  ): Promise<TaskRecord["status"]> {
+  ): Promise<{ status: TaskRecord["status"]; raw: string }> {
     const interval = this.#deps.pollIntervalMs ?? POLL_MS
     const until = this.#now() + Math.max(timeoutMs, 0)
     while (!this.#disposed && this.#now() < until) {
@@ -1277,31 +1305,39 @@ export class Runner {
         if (outcome === "succeeded") {
           // A member interrupted before its first answer ends succeeded with nothing to
           // say, and an empty output must not travel on as a result.
-          if (answer.trim()) return "completed"
+          if (answer.trim()) return { status: "completed", raw: answer }
           task.error = "the member ended without an answer"
-          return "failed"
+          return { status: "failed", raw: answer }
         }
         task.error = `the member session ended: ${outcome}`
-        return outcome === "interrupted" ? "cancelled" : "failed"
+        return { status: outcome === "interrupted" ? "cancelled" : "failed", raw: answer }
       }
       await this.#sleep(interval)
     }
-    if (this.#disposed) return "cancelled"
+    if (this.#disposed) return { status: "cancelled", raw: "" }
     await this.#deps.session.interrupt({ sessionID, continue: false }).catch(() => {})
     task.error = `the task did not finish within ${timeoutMs} ms`
-    return "timeout"
+    return { status: "timeout", raw: "" }
   }
 
-  /** A task with an `outputSchema` has to answer with JSON. A miss burns an attempt. */
-  #checkSchema(schema: Record<string, unknown>, task: TaskRecord): TaskRecord["status"] {
-    const found = extractJson(task.output ?? "")
+  /**
+   * A task with an `outputSchema` has to answer with JSON. A miss burns an attempt.
+   *
+   * `raw` is the member's answer before it was clipped into `task.output`, because a clipped
+   * JSON object cannot be parsed and would fail a task that answered correctly. See
+   * `VALIDATE_LIMIT` for the bound and for what that means for `task.data`.
+   */
+  #checkSchema(schema: Record<string, unknown>, task: TaskRecord, raw: string): TaskRecord["status"] {
+    const found = extractJson(raw.slice(0, VALIDATE_LIMIT))
     if (!found.ok) {
       task.error = `${found.error}; the task has an outputSchema, so it has to reply with one JSON object`
       return "failed"
     }
     const errors = validateJson(schema, found.value)
     if (errors.length > 0) {
-      task.error = `the output does not match outputSchema: ${errors.join("; ")}`
+      // The candidate is quoted as the member wrote it, not re-serialized, so a misfire is
+      // diagnosable from the run record alone.
+      task.error = `the output does not match outputSchema: ${errors.join("; ")}; the JSON object read was: ${found.text.slice(0, 200)}`
       return "failed"
     }
     task.data = found.value
