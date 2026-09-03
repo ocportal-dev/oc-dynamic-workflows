@@ -147,19 +147,75 @@ it("keeps a phase that completed whole and does not synthesise it again", async 
   }
   const runId = await fake.runner.start(spec, START)
   ;(await waitForSpawn(fake, 1)).settle("ALPHA RESULT")
-  ;(await waitForSpawn(fake, 2)).fail("the member blew up")
+  ;(await waitForSpawn(fake, 2)).settle("SYNTHESIS")
+  ;(await waitForSpawn(fake, 3)).fail("the member blew up")
   await fake.runner.wait(runId)
-  expect(fake.generated).toHaveLength(1)
 
   await fake.runner.resume(runId, START)
-  const again = await waitForSpawn(fake, 3)
+  const again = await waitForSpawn(fake, 4)
   expect(again.input.description).toBe(`wf:${runId}:b`)
   // The kept synthesis is what the second phase reads, and it is not written again.
   expect(again.input.prompt).toContain("SYNTHESIS")
-  expect(fake.generated).toHaveLength(1)
   again.settle("BETA RESULT")
   await fake.runner.wait(runId)
   expect((await fake.store.get(runId))?.status).toBe("completed")
+  await fake.stop()
+})
+
+it("retains prior synthesis spend across a resume when synthesis previously failed", async () => {
+  const fake = startRunner()
+  const spec: WorkflowSpec = {
+    specVersion: 1,
+    name: "retry-synthesis",
+    goal: "sum the task",
+    phases: [
+      {
+        id: "one",
+        strategy: "sequential",
+        synthesisPrompt: "sum it up",
+        tasks: [{ id: "a", kind: "agent", prompt: "a", retries: 0, keep: false }],
+      },
+      {
+        id: "two",
+        strategy: "sequential",
+        tasks: [{ id: "b", kind: "agent", prompt: "b", retries: 0, keep: false }],
+      },
+    ],
+  }
+  const runId = await fake.runner.start(spec, START)
+  ;(await waitForSpawn(fake, 1)).settle("ALPHA RESULT")
+  const firstSynthesis = await waitForSpawn(fake, 2)
+  fake.sessions.set(firstSynthesis.childID, {
+    cost: 0.5,
+    tokens: { input: 20, output: 30, reasoning: 40, cache: { read: 5, write: 5 } },
+  })
+  firstSynthesis.fail("first synthesis failed")
+  ;(await waitForSpawn(fake, 3)).fail("task b failed")
+  await fake.runner.wait(runId)
+
+  const runAfterFail = await fake.store.get(runId)
+  expect(runAfterFail?.status).toBe("partial")
+  expect(runAfterFail?.phases[0]!.synthesis?.status).toBe("failed")
+  expect(runAfterFail?.budget.spentUsd).toBeCloseTo(0.52, 5)
+
+  const resumed = await fake.runner.resume(runId, START)
+  expect(resumed.ok).toBe(true)
+  expect((await fake.store.get(runId))?.budget.spentUsd).toBeCloseTo(0.52, 5)
+
+  const secondSynthesis = await waitForSpawn(fake, 4)
+  fake.sessions.set(secondSynthesis.childID, {
+    cost: 0.3,
+    tokens: { input: 10, output: 15, reasoning: 20, cache: { read: 2, write: 3 } },
+  })
+  secondSynthesis.settle("SYNTHESIS SUCCESS")
+  ;(await waitForSpawn(fake, 5)).settle("BETA SUCCESS")
+  await fake.runner.wait(runId)
+
+  const finalRun = await fake.store.get(runId)
+  expect(finalRun?.status).toBe("completed")
+  expect(finalRun?.phases[0]!.synthesis?.status).toBe("completed")
+  expect(finalRun?.budget.spentUsd).toBeCloseTo(0.83, 5)
+  expect(finalRun?.budget.spentTokens).toBe(125 + 90 + 125 + 45 + 125)
   await fake.stop()
 })
 
@@ -206,6 +262,44 @@ it("marks a busy member of an orphaned run interrupted and leaves an ended one a
   expect(run!.phases[0]!.tasks.map((task) => task.status)).toEqual(["cancelled", "cancelled", "pending"])
   expect(fake.interrupts).toEqual(["ses_busy"])
   expect(fake.synthetic).toHaveLength(0)
+  await fake.stop()
+})
+
+it("interrupts a running synthesis when recovering an orphaned run", async () => {
+  const fake = startRunner()
+  const record: RunRecord = {
+    runId: "wf_orphan_synthesis",
+    specVersion: 1,
+    projectID: PROJECT,
+    spec: CHAIN,
+    status: "running",
+    concurrency: 1,
+    leadSessionID: LEAD,
+    leadAgent: LEAD_AGENT,
+    budget: { spentUsd: 0, spentTokens: 0 },
+    mailbox: { maxMessages: 20, used: 0 },
+    phases: [
+      {
+        id: "one",
+        strategy: "sequential",
+        status: "running",
+        tasks: [],
+        synthesis: { status: "running", sessionID: "ses_orphan_synthesis" },
+      },
+    ],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  fake.sessions.set("ses_orphan_synthesis", {
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  })
+  await fake.store.put(record)
+  await fake.runner.recoverOrphans()
+
+  expect(fake.interrupts).toContain("ses_orphan_synthesis")
+  expect(record.status).toBe("orphaned")
+  expect(record.phases[0]!.synthesis).toMatchObject({ status: "failed", error: "OpenCode restarted during the run" })
   await fake.stop()
 })
 

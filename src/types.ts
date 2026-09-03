@@ -117,7 +117,22 @@ export interface PhaseRecord {
   /** `repeat` phases only: one entry per finished round. */
   rounds?: RoundRecord[]
   tasks: TaskRecord[]
-  synthesis?: { status: "pending" | "running" | "completed" | "failed"; output?: string; error?: string }
+  /** Synthesis usage per session, kept so resuming a failed synthesis does not drop earlier spend. */
+  synthesisAttemptsUsage?: Record<
+    string,
+    { input: number; output: number; reasoning: number; cache: number; cost: number }
+  >
+  /** Total synthesis usage for this phase across all sessions. */
+  synthesisUsage?: { input: number; output: number; reasoning: number; cache: number; cost: number }
+  synthesis?: {
+    status: "pending" | "running" | "completed" | "failed"
+    /** The visible child session that produced this synthesis. */
+    sessionID?: string
+    output?: string
+    error?: string
+    /** The authoritative usage reported by the synthesis child session. */
+    usage?: { input: number; output: number; reasoning: number; cache: number; cost: number }
+  }
 }
 
 export interface RunRecord {

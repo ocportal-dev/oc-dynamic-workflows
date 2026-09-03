@@ -11,6 +11,13 @@ export interface Member {
   sessionID: string
 }
 
+/** A visible phase synthesis child, distinct from task members. */
+export interface SynthesisMember {
+  runId: string
+  phaseId: string
+  sessionID: string
+}
+
 export interface SessionCreated {
   sessionID: string
   parentID?: string
@@ -25,6 +32,11 @@ const PREFIX = "wf:"
 /** The child session title. Unique per attempt, so a retry gets its own child. */
 export function describeTask(runId: string, taskId: string, attempt: number): string {
   return attempt > 1 ? `${PREFIX}${runId}:${taskId}#${attempt}` : `${PREFIX}${runId}:${taskId}`
+}
+
+/** The child session title for synthesis. Unique per run and phase, so concurrent runs never collide. */
+export function describeSynthesis(runId: string, phaseId: string): string {
+  return `workflow synthesis: ${runId}:${phaseId}`
 }
 
 /** Reads a run and a task back out of a child session title. */
@@ -47,6 +59,11 @@ export class Roster {
   #children = new Map<string, string>()
   /** spawn description → the waiter that `expect` is holding. */
   #waiting = new Map<string, (sessionID: string) => void>()
+  /** Synthesis descriptions cannot use the task-title grammar, so they have their own map. */
+  #expectedSyntheses = new Map<string, { runId: string; phaseId: string }>()
+  #synthesisWaiting = new Map<string, (sessionID: string) => void>()
+  /** child session id → visible synthesis. Kept apart from task members. */
+  #syntheses = new Map<string, SynthesisMember>()
   /** session id → the time its miss expires. A session with no run costs one lookup per interval. */
   #misses = new Map<string, number>()
   #lookup: SessionLookup
@@ -83,9 +100,36 @@ export class Roster {
     this.#children.delete(description)
   }
 
+  /** Waits for a synthesis child announced under its human-readable title. */
+  expectSynthesis(runId: string, phaseId: string, description: string): Promise<string> {
+    this.#expectedSyntheses.set(description, { runId, phaseId })
+    const known = this.#children.get(description)
+    if (known) return Promise.resolve(known)
+    return new Promise((resolve) => this.#synthesisWaiting.set(description, resolve))
+  }
+
+  /** Drops a synthesis waiter once its spawn has settled. */
+  forgetSynthesis(description: string): void {
+    this.#expectedSyntheses.delete(description)
+    this.#synthesisWaiting.delete(description)
+    this.#children.delete(description)
+  }
+
   observeCreated(event: SessionCreated): void {
     if (!event.title || !event.parentID) return
     if (!this.#leads.has(event.parentID)) return
+    const synthesis = this.#expectedSyntheses.get(event.title)
+    if (synthesis) {
+      this.#children.set(event.title, event.sessionID)
+      this.#misses.delete(event.sessionID)
+      this.#syntheses.set(event.sessionID, { ...synthesis, sessionID: event.sessionID })
+      const waiter = this.#synthesisWaiting.get(event.title)
+      if (waiter) {
+        this.#synthesisWaiting.delete(event.title)
+        waiter(event.sessionID)
+      }
+      return
+    }
     const parsed = parseDescription(event.title)
     if (!parsed) return
     this.#children.set(event.title, event.sessionID)
@@ -104,8 +148,18 @@ export class Roster {
     this.#members.set(sessionID, { runId, taskId, sessionID })
   }
 
+  /** Records a synthesis session the executor returned before its create event was observed. */
+  bindSynthesis(runId: string, phaseId: string, sessionID: string): void {
+    this.#misses.delete(sessionID)
+    this.#syntheses.set(sessionID, { runId, phaseId, sessionID })
+  }
+
   member(sessionID: string): Member | undefined {
     return this.#members.get(sessionID)
+  }
+
+  synthesis(sessionID: string): SynthesisMember | undefined {
+    return this.#syntheses.get(sessionID)
   }
 
   /**

@@ -55,7 +55,12 @@ const FIX = `use a read-only role (${ROLE_NAMES.join(", ")}) or explore, and dro
  * An agent the host does not list counts as may-edit, because under a read-only lead the
  * unknown case is refused rather than waved through.
  */
-export function readOnlyViolations(spec: WorkflowSpec, agents: unknown[] | undefined, defaultAgent: string): string[] {
+export function readOnlyViolations(
+  spec: WorkflowSpec,
+  agents: unknown[] | undefined,
+  defaultAgent: string,
+  synthesizerAgent = "synthesizer",
+): string[] {
   const lines: string[] = []
   for (const phase of spec.phases) {
     for (const task of phase.tasks) {
@@ -68,6 +73,9 @@ export function readOnlyViolations(spec: WorkflowSpec, agents: unknown[] | undef
       }
       if (reasons.length) lines.push(`${phase.id}/${task.id}: ${reasons.join("; ")}`)
     }
+  }
+  if (spec.phases.some((phase) => phase.synthesisPrompt !== undefined) && mayEdit(agentRules(agents, synthesizerAgent))) {
+    lines.push(`synthesis: agent "${synthesizerAgent}" may edit`)
   }
   if (lines.length) lines.push(FIX)
   return lines

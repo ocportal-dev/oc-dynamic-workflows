@@ -374,6 +374,7 @@ it("reports the agent and the model of every role", async () => {
     { role: "security-reviewer", agent: "security-reviewer", state: "subagent", modelState: "inherited" },
     { role: "researcher", agent: "explore", state: "missing", model: "openai/ghost", modelState: "unlisted" },
     { role: "stakeholder", agent: "stakeholder", state: "subagent", modelState: "inherited" },
+    { role: "synthesizer", agent: "synthesizer", state: "subagent", modelState: "inherited" },
   ])
   expect(result.content).toContain("role reviewer: agent reviewer (subagent), model anthropic/opus (listed)")
   expect(result.content).toContain("role security-reviewer: agent security-reviewer (subagent), model inherited")

@@ -104,3 +104,19 @@ it("finds nothing to refuse in a spec of read-only roles", () => {
   )
   expect(violations).toEqual([])
 })
+
+it("refuses an editing synthesizer when the phase has a synthesis prompt", () => {
+  const workflow = spec([{ id: "research", agent: "researcher" }])
+  workflow.phases[0]!.synthesisPrompt = "Summarise the research"
+  const violations = readOnlyViolations(
+    workflow,
+    [
+      { id: "researcher", name: "researcher", permissions: EXPLORE },
+      { id: "summary-agent", name: "summary-agent", permissions: BUILD },
+    ],
+    "general",
+    "summary-agent",
+  )
+  expect(violations[0]).toBe('synthesis: agent "summary-agent" may edit')
+  expect(violations[1]).toContain("synthesizer")
+})

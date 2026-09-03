@@ -1,7 +1,7 @@
 import { expect, it } from "bun:test"
 import { parseModel, resolveConfig } from "../src/config.js"
 
-const NO_ROLES = { reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {} }
+const NO_ROLES = { reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {}, synthesizer: {} }
 
 const DEFAULTS = {
   defaultAgent: "general",
@@ -135,6 +135,7 @@ it("reads the model and the agent of a role", () => {
   })
   expect(config.roles.researcher).toEqual({ agent: "explore" })
   expect(config.roles.stakeholder).toEqual({})
+  expect(config.roles.synthesizer).toEqual({})
   expect(warnings).toEqual([])
 })
 
@@ -142,9 +143,9 @@ it("warns about an unknown role, a bad model, and a wrong type, and keeps every 
   const { config, warnings } = resolveConfig({
     roles: { auditor: {}, reviewer: { model: "sonnet" }, researcher: "explore", stakeholder: { agent: 7 } },
   })
-  expect(config.roles).toEqual({ reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {} })
+  expect(config.roles).toEqual({ reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {}, synthesizer: {} })
   expect(warnings).toEqual([
-    "options.roles.auditor is not a role; the roles are reviewer, security-reviewer, researcher, stakeholder",
+    "options.roles.auditor is not a role; the roles are reviewer, security-reviewer, researcher, stakeholder, synthesizer",
     'options.roles.reviewer.model must be a "provider/model" string; ignoring it',
     "options.roles.researcher must be an object; ignoring it",
     "options.roles.stakeholder.agent must be a non-empty string; ignoring it",
@@ -165,4 +166,14 @@ it("reads the synthesis model and warns about a bad one", () => {
   const bad = resolveConfig({ synthesisModel: 7 })
   expect(bad.config.synthesisModel).toBeUndefined()
   expect(bad.warnings).toEqual(['options.synthesisModel must be a "provider/model" string; ignoring it'])
+})
+
+it("uses synthesisModel rather than a synthesizer role model", () => {
+  const { config, warnings } = resolveConfig({
+    synthesisModel: "openai/gpt-5",
+    roles: { synthesizer: { model: "anthropic/opus", agent: "summary-agent" } },
+  })
+  expect(config.synthesisModel).toEqual({ providerID: "openai", id: "gpt-5" })
+  expect(config.roles.synthesizer).toEqual({ agent: "summary-agent" })
+  expect(warnings).toEqual(["options.roles.synthesizer.model is ignored; use options.synthesisModel instead"])
 })

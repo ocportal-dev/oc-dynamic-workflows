@@ -89,7 +89,6 @@ function makeWorld() {
   const synthetic: Synthetic[] = []
   const sessions = new Map<string, FakeSession>()
   const messages = new Map<string, unknown[]>()
-  const generated: { prompt: string; model?: { providerID: string; id: string; variant?: string } }[] = []
   /** What `ctx.agent.list` answers, and what `ctx.agent.transform` writes into. */
   const agents: MutableAgent[] = [{ id: "general", name: "general", mode: "subagent", permissions: [] }]
   /** What `ctx.catalog.model.list` answers. A test pushes the model it wants listed. */
@@ -99,7 +98,6 @@ function makeWorld() {
   const queue: unknown[] = []
   const flight = { now: 0, max: 0 }
   let wake: (() => void) | undefined
-  let generatedText = "SYNTHESIS"
   let promptFails = false
   let announceChildren = true
   let storageFails: ((key: string) => boolean) | undefined
@@ -235,13 +233,6 @@ function makeWorld() {
     }
   }
 
-  const generate = {
-    text: async (input: { prompt: string; model?: { providerID: string; id: string; variant?: string } }) => {
-      generated.push(input)
-      return { text: generatedText }
-    },
-  }
-
   return {
     spawns,
     storage,
@@ -256,8 +247,6 @@ function makeWorld() {
     sessions,
     gets,
     messages,
-    generated,
-    generate,
     agents,
     models,
     plugins,
@@ -289,9 +278,6 @@ function makeWorld() {
     /** Scripts the answer the user gave to that ask. */
     reply: (sessionID: string, requestID: string, reply: "once" | "always" | "reject") => {
       emit({ type: "permission.replied", data: { sessionID, requestID, reply } })
-    },
-    setGeneratedText: (text: string) => {
-      generatedText = text
     },
     /** Makes every later `session.prompt` reject, which a command must survive. */
     setPromptFails: (value: boolean) => {
@@ -395,7 +381,6 @@ export async function startPlugin(
         }
       },
     },
-    generate: world.generate,
     // The host answers `{ location, data }`, not a plain array.
     agent: {
       list: async () => ({ location: {}, data: world.agents }),
@@ -517,7 +502,6 @@ export function startRunner(
     directory?: string
     now?: () => number
     pollIntervalMs?: number
-    generate?: boolean
     /** How long a burst of questions is collected. Short, so a test does not wait. */
     debounceMs?: number
     /** Written over the resolved config, so a test can use a value the clamp forbids. */
@@ -554,7 +538,6 @@ export function startRunner(
     config,
     mailbox,
     directory: options.directory ?? "/project",
-    generate: options.generate === false ? undefined : world.generate.text,
     now: options.now,
     pollIntervalMs: options.pollIntervalMs ?? 5,
     childPollMs: options.childPollMs ?? 1,

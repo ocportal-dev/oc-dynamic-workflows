@@ -1,4 +1,4 @@
-/** A model of the catalog, the shape core and `ctx.generate.text` take. */
+/** A model reference in the form OpenCode agents take. */
 export interface ModelRef {
   providerID: string
   id: string
@@ -6,7 +6,7 @@ export interface ModelRef {
 }
 
 /** The roles the plugin registers one subagent for. */
-export const ROLE_NAMES = ["reviewer", "security-reviewer", "researcher", "stakeholder"] as const
+export const ROLE_NAMES = ["reviewer", "security-reviewer", "researcher", "stakeholder", "synthesizer"] as const
 export type RoleName = (typeof ROLE_NAMES)[number]
 
 export interface RoleConfig {
@@ -21,7 +21,7 @@ export interface WorkflowConfig {
   defaultAgent: string
   /** The model and the agent of every role. Every role has an entry. */
   roles: Record<RoleName, RoleConfig>
-  /** The model a phase synthesis runs on. Without one the catalog default is used. */
+  /** The model a phase synthesis runs on. Without one it inherits the lead's model. */
   synthesisModel?: ModelRef
   /** How many tasks of one phase run at the same time. */
   concurrency: number
@@ -41,7 +41,7 @@ export interface WorkflowConfig {
 
 const DEFAULTS: WorkflowConfig = {
   defaultAgent: "general",
-  roles: { reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {} },
+  roles: { reviewer: {}, "security-reviewer": {}, researcher: {}, stakeholder: {}, synthesizer: {} },
   concurrency: 4,
   maxAgents: 100,
   mailboxMaxMessages: 20,
@@ -143,7 +143,12 @@ function rolesOption(value: unknown, warnings: string[]): Record<RoleName, RoleC
       warnings.push(`options.roles.${role} must be an object; ignoring it`)
       continue
     }
-    const model = modelOption(fields.model, `options.roles.${role}.model`, warnings)
+    // Synthesis has one model source of truth. Do not retain this value: otherwise the
+    // doctor could report a model different from the one its child session uses.
+    const model =
+      role === "synthesizer" && fields.model !== undefined
+        ? (warnings.push("options.roles.synthesizer.model is ignored; use options.synthesisModel instead"), undefined)
+        : modelOption(fields.model, `options.roles.${role}.model`, warnings)
     const agent = agentOption(fields.agent, `options.roles.${role}.agent`, warnings)
     roles[role] = { ...(model ? { model } : {}), ...(agent ? { agent } : {}) }
   }

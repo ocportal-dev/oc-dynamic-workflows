@@ -8,9 +8,10 @@ An opencode plugin (`opencode-dynamic-workflows`) that lets an agent write a sma
 workflow spec, fan the tasks out to child sessions, join the results, and exchange mail
 with the members of a `team` phase.
 
-It runs `sequential`, `parallel`, and `team` phases, joins a phase with a synthesis, and
-shapes the request of every session that belongs to a run. A `sequential` phase can carry a
-`repeat` gate, which runs the phase again until its last task approves the round. A `team`
+It runs `sequential`, `parallel`, and `team` phases, joins a phase through a visible read-only
+`synthesizer` child session, and shapes the request of every session that belongs to a run. A
+`sequential` phase can carry a `repeat` gate, which runs the phase again until its last task
+approves the round. A `team`
 phase runs like a `parallel` one with the hub mailbox open, so a member can reach the lead
 while it works and the lead can steer a member back. `workflow_resume` picks a run up again
 after a failure, a budget stop, a cancel, or a restart, and keeps every task that already
@@ -61,8 +62,8 @@ publish date. Install with `npm install --min-release-age=0`.
 - **`src/config.ts`** — Reads `ctx.options`. Clamps every number. Never throws; an invalid
   value becomes a warning and the default. Holds `ROLE_NAMES`, `parseModel`, and
   `formatModel`, because `roles` and `synthesisModel` are parsed there.
-- **`src/roles.ts`** — The four role agents (`reviewer`, `security-reviewer`, `researcher`,
-  `stakeholder`): their prompts, `roleAgentId`, `roleAgents`, `READ_ONLY_RULES`, and
+- **`src/roles.ts`** — The five role agents (`reviewer`, `security-reviewer`, `researcher`,
+  `stakeholder`, `synthesizer`): their prompts, `roleAgentId`, `roleAgents`, `READ_ONLY_RULES`, and
   `applyRole`, which writes a role onto the agent the draft holds. `applyRole` is idempotent,
   because the host replays the transform.
 - **`src/log.ts`** — The console prefix and `swallow`, the catch handler every promise that
@@ -230,10 +231,12 @@ live `opencode2` (spike S6).
   (`@opencode-ai/plugin/dist/promise/adapter.js:352`), so a rejection is a defect, and the
   direct path catches `Tool.Error` only (`core/src/session/runner/step.ts:122`) and then fails
   every unsettled tool call of the step (`step.ts:198-206`).
-- `ctx.generate.text({ prompt, model? })` resolves to `{ text }`. `model` is a `Model.Ref`
-  (`{ providerID, id, variant? }`) with branded strings, so `src/index.ts` casts once. With no
-  `model` it uses the catalog default. It can answer with an empty string, so an empty synthesis is
-  recorded as a failure instead of being passed on.
+- A phase synthesis is a real child session spawned through the captured `subagent` executor on
+  the read-only `synthesizer` agent, parented to the lead. Its prompt contains the synthesis
+  instruction, workflow header, and escaped `<untrusted>` task outputs. An empty answer is a
+  synthesis failure. It uses the normal task timeout (capped by the remaining run deadline), can
+  be interrupted by cancellation or a budget stop, and its authoritative `session.get` usage is
+  recorded when it settles or is interrupted.
 - `ctx.agent.list()` resolves to `{ location, data: Agent.Info[] }`, not to a plain array.
   An `Agent.Info` carries `id`, `name`, and `mode` (`subagent`, `primary`, or `all`).
 - `ctx.agent.transform(callback)` works like the other transforms. The draft has `list()`,
@@ -343,10 +346,10 @@ live `opencode2` (spike S6).
 - The context hook never writes state and never throws, because it fires on every request.
 - One clock per task (`defaultTaskTimeoutMs`) and one for the whole run (`maxRunMinutes`).
   A run that passes its limit drops the remaining work and ends as `partial`.
-- A budget is never required. The cap is read before a task starts, after one settles, and
-  after a mailbox wake was charged. Past it no new task starts, the members that are still
-  going are interrupted, what is left is skipped, and the run ends `partial` with the cap
-  named in `run.error`.
+- A budget is never required. The cap is read before a task starts, after one settles, after a
+  synthesis usage update, and after a mailbox wake was charged. Past it no new task starts; a
+  still-running member or synthesis child is interrupted, what is left is skipped, and the run
+  ends `partial` with the cap named in `run.error`.
 - A resume keeps the run id, the spend, and every completed task, and it re-homes the lead
   to the caller. The prompt of a task that runs again is rebuilt from the record, never
   re-read from a member session. A phase that completed with its synthesis is skipped whole;
@@ -354,8 +357,9 @@ live `opencode2` (spike S6).
 - A resume is refused while the run is `running`, when it is `completed`, and when the
   budget is already spent and no override raises the cap. Each refusal names the next step.
 - A restart leaves no run loop behind, so `recoverOrphans` marks such a run `orphaned`,
-  marks its `running` tasks `cancelled`, and interrupts every member that has no outcome
-  yet, because core resumes a suspended child on its own. The lead is not woken.
+  marks its `running` tasks `cancelled`, marks a running synthesis failed, and interrupts every
+  member or synthesis child that has no outcome yet, because core resumes a suspended child on
+  its own. The lead is not woken.
 - `task.model` is rejected in v1 with a message that names the fix. A model per task comes
   from a role instead: `options.roles.<role>.model` lands on the agent the plugin registers,
   and a task that names that role runs on it.
@@ -385,8 +389,9 @@ live `opencode2` (spike S6).
 - The `draft` task of `plan-research` runs on `researcher` and its prompt says to answer with
   the plan instead of the role's JSON shape. A plan is prose, and only a read-only role keeps
   the workflow startable under a plan-mode lead.
-- `options.synthesisModel` is the model of every phase synthesis. The key is left out of the
-  `ctx.generate.text` call when there is none, so the catalog default is used.
+- `options.synthesisModel` is the sole model source of the `synthesizer` role. Without it, the
+  synthesizer child inherits the lead model. `options.roles.synthesizer.model` is ignored with a
+  warning; `options.roles.synthesizer.agent` may redirect synthesis to a user-owned agent.
 - D14, one engine per project. `src/engine.ts` holds it, keyed by the storage prefix and
   refcounted. A worktree is another location, so opencode boots a second plugin instance for
   it, and that instance serves the member's hooks, tool calls, and events. It has to see the

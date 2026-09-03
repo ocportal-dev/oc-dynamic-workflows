@@ -142,7 +142,12 @@ export function workflowTools(deps: ToolDeps): WorkflowTool[] {
   const denyEdits = async (spec: WorkflowSpec, context: Caller): Promise<Result | undefined> => {
     const agents = await listAgents(deps)
     if (mayEdit(agentRules(agents, context.agent))) return undefined
-    const violations = readOnlyViolations(spec, agents, deps.config.defaultAgent)
+    const violations = readOnlyViolations(
+      spec,
+      agents,
+      deps.config.defaultAgent,
+      roleAgentId(deps.config, "synthesizer"),
+    )
     if (!violations.length) return undefined
     const error = `your agent "${context.agent}" cannot edit, so this run may not edit either:`
     return {
@@ -594,7 +599,7 @@ async function diagnose(deps: ToolDeps): Promise<Doctor> {
     executor: deps.spawner.available() ? "available" : "missing",
     defaultAgent: { name: deps.config.defaultAgent, state: agentState(agents, deps.config.defaultAgent) },
     roles: ROLE_NAMES.map((role) => {
-      const model = deps.config.roles[role].model
+      const model = role === "synthesizer" ? deps.config.synthesisModel : deps.config.roles[role].model
       const agent = roleAgentId(deps.config, role)
       return {
         role,

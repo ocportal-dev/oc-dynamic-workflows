@@ -7,8 +7,8 @@ function blank(id: string): MutableAgent {
   return { id, name: id, mode: "primary", permissions: [{ action: "edit", resource: "**", effect: "allow" }] }
 }
 
-it("names the four roles", () => {
-  expect([...ROLE_NAMES]).toEqual(["reviewer", "security-reviewer", "researcher", "stakeholder"])
+it("names the five roles", () => {
+  expect([...ROLE_NAMES]).toEqual(["reviewer", "security-reviewer", "researcher", "stakeholder", "synthesizer"])
 })
 
 it("registers every role that names no agent of its own", () => {
@@ -17,6 +17,7 @@ it("registers every role that names no agent of its own", () => {
     { id: "reviewer", model: { providerID: "anthropic", id: "opus" } },
     { id: "security-reviewer" },
     { id: "stakeholder" },
+    { id: "synthesizer" },
   ])
 })
 
@@ -24,6 +25,7 @@ it("uses the agent the options name for a role, and the role name otherwise", ()
   const { config } = resolveConfig({ roles: { researcher: { agent: "explore" } } })
   expect(roleAgentId(config, "researcher")).toBe("explore")
   expect(roleAgentId(config, "reviewer")).toBe("reviewer")
+  expect(roleAgentId(config, "synthesizer")).toBe("synthesizer")
 })
 
 it("makes a role a read-only subagent with a prompt", () => {
@@ -55,11 +57,16 @@ it("changes nothing on a replay", () => {
   expect(agent.permissions.filter((rule) => rule.action === "edit")).toHaveLength(2)
 })
 
-it("gives every role a prompt that answers with JSON and edits nothing", () => {
+it("gives every role a read-only prompt", () => {
   for (const role of ROLE_NAMES) {
     const agent: MutableAgent = { ...blank(role), permissions: [] }
     applyRole(agent, { id: role })
-    expect(agent.system, role).toContain("JSON object")
+    if (role === "synthesizer") {
+      expect(agent.system, role).toContain("Call no tools")
+      expect(agent.system, role).toContain("synthesis text only")
+    } else {
+      expect(agent.system, role).toContain("JSON object")
+    }
     expect(agent.system!.split("\n").length, role).toBeLessThan(40)
     expect(agent.permissions, role).toEqual([...READ_ONLY_RULES])
   }

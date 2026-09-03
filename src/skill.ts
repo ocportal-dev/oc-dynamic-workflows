@@ -141,9 +141,11 @@ with \`"agent"\` on a task, the way you name any other agent.
 | \`security-reviewer\` | Judges the same edits for injection, broken authorization, secrets, and path traversal | the same shape |
 | \`researcher\` | Gathers facts and names a source for every claim | \`{ "findings": [{ "claim", "source" }], "open": string[] }\` |
 | \`stakeholder\` | Checks a result against the goal, not against what the producers said about it | \`{ "approved": boolean, "gaps": string[] }\` |
+| \`synthesizer\` | Joins the outputs of a phase into one coherent summary | synthesis text only |
 
 A role edits nothing, spawns nothing, and never stops to ask a question. Its model comes from
-\`roles.<role>.model\` in the plugin options.
+\`roles.<role>.model\` in the plugin options. The synthesizer instead follows
+\`options.synthesisModel\`.
 
 ## Review gates
 

@@ -1,12 +1,13 @@
 import { budgetExceeded, overrideFor } from "./budget.js"
-import type { ModelRef, WorkflowConfig } from "./config.js"
+import type { WorkflowConfig } from "./config.js"
 import { countTokens } from "./events.js"
 import { swallow } from "./log.js"
 import type { Mailbox } from "./mailbox.js"
 import { extractJson, validateJson } from "./output-schema.js"
-import { findTask, RunStore } from "./persistence.js"
+import { findTask, recount, RunStore } from "./persistence.js"
 import { describePermission, renderFinalReport, wrapUntrusted } from "./report.js"
-import { describeTask, Roster } from "./roster.js"
+import { describeSynthesis, describeTask, Roster } from "./roster.js"
+import { roleAgentId } from "./roles.js"
 import { type ShellHandle, startShell } from "./shell.js"
 import { parseSpec } from "./spec.js"
 import type { Spawner } from "./spawner.js"
@@ -49,8 +50,6 @@ export interface RunnerDeps {
   directory: string
   /** The run ids this process has a loop for. Shared by every instance of the engine. */
   activeRuns?: Set<string>
-  /** `ctx.generate.text`. Without it a phase cannot be synthesised. */
-  generate?: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }>
   /** The clock the run limit reads. A test can move it. */
   now?: () => number
   /** How often a backgrounded member is asked whether it finished. */
@@ -111,7 +110,11 @@ const FINDING_LIMIT = 1000
  */
 type Live =
   | { kind: "agent"; cancel: (childSessionID: string) => Promise<void>; sessionID?: string }
+  | { kind: "synthesis"; phaseId: string; cancel: (childSessionID: string) => Promise<void>; sessionID?: string }
   | { kind: "shell"; cancel: () => void }
+
+/** Keeps a live synthesis distinct from every task id in the same run. */
+const synthesisLiveKey = (phaseID: string): string => `synthesis:${phaseID}`
 
 /**
  * Runs a workflow away from the tool call that started it.
@@ -338,10 +341,14 @@ export class Runner {
       const run = await this.#deps.store.get(entry.runId)
       if (!run || run.status !== "running") continue
       const resurrected = run.phases.flatMap((phase) => phase.tasks).filter((task) => task.status === "running")
+      const syntheses = run.phases
+        .filter((phase) => phase.synthesis?.status === "running" && phase.synthesis.sessionID)
+        .map((phase) => phase.synthesis!.sessionID!)
       markOrphaned(run, "OpenCode restarted during the run")
       for (const task of resurrected) {
         if (task.sessionID) await this.#interruptResurrected(task.sessionID)
       }
+      for (const sessionID of syntheses) await this.#interruptResurrected(sessionID)
       // The member's edits are the only thing the restart would otherwise lose.
       await this.#settleWorktrees(run)
       await this.#deps.store.put(run)
@@ -464,7 +471,20 @@ export class Runner {
         live.cancel()
         continue
       }
-      const sessionID = live.sessionID ?? findTask(run, id)?.sessionID
+      let sessionID =
+        live.sessionID ??
+        (live.kind === "agent"
+          ? findTask(run, id)?.sessionID
+          : live.kind === "synthesis"
+            ? run.phases.find((phase) => phase.id === live.phaseId)?.synthesis?.sessionID
+            : undefined)
+      // A cancel can land after the executor started creating a synthesis but before the
+      // create event reached the roster. Wait a bounded interval so that child is not left
+      // running without its parent loop.
+      if (!sessionID && live.kind === "synthesis") {
+        const phase = run.phases.find((candidate) => candidate.id === live.phaseId)
+        if (phase) sessionID = await this.#waitForSynthesisChild(live, phase)
+      }
       if (sessionID) await live.cancel(sessionID).catch(swallow("a member interrupt"))
     }
   }
@@ -496,7 +516,7 @@ export class Runner {
       for (const task of phase.tasks) if (task.status === "pending") task.status = "skipped"
       phase.status = phaseStatus(phase)
       await this.#deps.store.put(run)
-      await this.#synthesize(run, phase, spec)
+      await this.#synthesize(run, phase, spec, deadline)
       // A sequential phase stops at its first failed task, so the run stops with it. A
       // parallel phase goes on unless every one of its tasks failed.
       const stopped = phase.strategy === "sequential" ? phase.status !== "completed" : phase.status === "failed"
@@ -621,39 +641,107 @@ export class Runner {
     await Promise.all(Array.from({ length: workers }, work))
   }
 
-  /** One text that joins the outputs of a phase, written by a transient generation. */
-  async #synthesize(run: RunRecord, phase: PhaseRecord, spec: PhaseSpec): Promise<void> {
-    // A run stopped by a cancel or by its budget must not buy one more generation.
-    if (!spec.synthesisPrompt || this.#halted(run.runId)) return
+  /** One text that joins a phase's outputs, produced by a visible child of the lead. */
+  async #synthesize(run: RunRecord, phase: PhaseRecord, spec: PhaseSpec, deadline: number): Promise<void> {
+    // A run stopped by a cancel, a budget, or its clock must not buy another child turn.
+    if (!spec.synthesisPrompt || this.#halted(run.runId) || (await this.#outOfTime(run, deadline))) return
     const outputs = phase.tasks.filter((task) => task.output)
     if (outputs.length === 0) return
-
-    phase.synthesis = { status: "running" }
-    await this.#deps.store.put(run)
-    const generate = this.#deps.generate
-    if (!generate) {
-      phase.synthesis = { status: "failed", error: "text generation is not available in this plugin context" }
-      await this.#deps.store.put(run)
-      return
-    }
 
     const prompt = [
       spec.synthesisPrompt,
       ...specHeader(run),
       ...outputs.map((task) => wrapUntrusted(task.kind, task.taskId, clip(task.output ?? "", CONTEXT_LIMIT))),
     ].join("\n\n")
-    try {
-      // The key is left out without a model, so the catalog default is used.
-      const model = this.#deps.config.synthesisModel
-      const { text } = await generate(model ? { prompt, model } : { prompt })
-      // An empty summary must not travel to the next phase as if it said something.
-      phase.synthesis = text.trim()
-        ? { status: "completed", output: text }
-        : { status: "failed", error: "the generation returned no text" }
-    } catch (error) {
-      phase.synthesis = { status: "failed", error: describe(error) }
-    }
+    const description = describeSynthesis(run.runId, phase.id)
+    const live: Extract<Live, { kind: "synthesis" }> = { kind: "synthesis", phaseId: phase.id, cancel: async () => {} }
+    phase.synthesis = { status: "running" }
+    this.#live.get(run.runId)?.set(synthesisLiveKey(phase.id), live)
+    // Register before spawn because the child can publish usage as soon as it is created.
+    // A synthesis is not registered as a task member.
+    const expected = this.#deps.roster.expectSynthesis(run.runId, phase.id, description)
+    expected
+      .then((sessionID) => {
+        live.sessionID = sessionID
+        if (phase.synthesis) phase.synthesis.sessionID = sessionID
+      })
+      .catch(swallow("a synthesis child lookup"))
     await this.#deps.store.put(run)
+    // Read this immediately before the spawn: a synthesis can follow several child turns,
+    // so the message captured at the start of the run is no longer safe for a permission ask.
+    const messageID = await this.#leadMessage(run.leadSessionID)
+    if (this.#halted(run.runId) || (await this.#outOfTime(run, deadline))) {
+      phase.synthesis = {
+        ...phase.synthesis,
+        status: "failed",
+        error: this.#cancelled.has(run.runId) ? "the synthesis was cancelled" : run.error,
+      }
+      this.#deps.roster.forgetSynthesis(description)
+      this.#live.get(run.runId)?.delete(synthesisLiveKey(phase.id))
+      await this.#deps.store.put(run)
+      return
+    }
+    // Do not await between this read and spawn: usage can arrive as soon as the executor
+    // creates the child, and the forged context must use this newest id.
+    const handle = this.#deps.spawner.spawn({
+      lead: run.leadSessionID,
+      leadAgent: run.leadAgent,
+      messageID,
+      agent: roleAgentId(this.#deps.config, "synthesizer"),
+      description,
+      prompt,
+    })
+    live.cancel = handle.cancel
+    const remaining = Math.max(deadline - this.#now(), 0)
+    const timeoutMs = Math.min(this.#deps.config.defaultTaskTimeoutMs, remaining)
+    const runClockWins = remaining <= this.#deps.config.defaultTaskTimeoutMs
+
+    try {
+      const settled = await race(handle.promise, timeoutMs)
+      if (settled.type === "timeout") {
+        const sessionID = live.sessionID ?? phase.synthesis?.sessionID ?? (await this.#waitForSynthesisChild(live, phase))
+        if (runClockWins) {
+          await this.#outOfTime(run, deadline)
+        } else if (sessionID) {
+          await handle.cancel(sessionID).catch(swallow("a synthesis interrupt"))
+        }
+        if (sessionID) await handle.promise.catch(() => {})
+        else handle.promise.catch(swallow("an abandoned synthesis child"))
+        phase.synthesis = {
+          ...phase.synthesis,
+          status: "failed",
+          error: runClockWins
+            ? `the run passed its limit of ${this.#deps.config.maxRunMinutes} minutes and was stopped`
+            : `the synthesis did not finish within ${timeoutMs} ms`,
+        }
+      } else if (settled.type === "error") {
+        phase.synthesis = {
+          ...phase.synthesis,
+          status: "failed",
+          error: this.#cancelled.has(run.runId) ? "the synthesis was cancelled" : describe(settled.error),
+        }
+      } else if (settled.value.status === "running") {
+        const sessionID = settled.value.sessionID
+        live.sessionID = sessionID
+        this.#deps.roster.bindSynthesis(run.runId, phase.id, sessionID)
+        phase.synthesis = { ...phase.synthesis, sessionID }
+        const result = await this.#awaitSynthesisBackground(run, phase, sessionID, timeoutMs, deadline)
+        phase.synthesis = { ...phase.synthesis, ...result }
+      } else {
+        const { sessionID, output } = settled.value
+        live.sessionID = sessionID
+        this.#deps.roster.bindSynthesis(run.runId, phase.id, sessionID)
+        phase.synthesis = output.trim()
+          ? { ...phase.synthesis, sessionID, status: "completed", output }
+          : { ...phase.synthesis, sessionID, status: "failed", error: "the synthesis returned no text" }
+      }
+    } finally {
+      const sessionID = live.sessionID ?? phase.synthesis?.sessionID
+      if (sessionID) await this.#readSynthesisUsage(run, phase, sessionID)
+      this.#deps.roster.forgetSynthesis(description)
+      this.#live.get(run.runId)?.delete(synthesisLiveKey(phase.id))
+      await this.#deps.store.put(run)
+    }
   }
 
   /** Nothing is left `pending` in a run that has ended. */
@@ -688,7 +776,7 @@ export class Runner {
     const stop = budgetExceeded(run)
     if (!stop) return false
     const left = run.phases.some((phase) =>
-      phase.tasks.some((task) => task.status === "pending" || task.status === "running"),
+      phase.tasks.some((task) => task.status === "pending" || task.status === "running") || phase.synthesis?.status === "running",
     )
     if (!left) return false
     this.#overspent.add(run.runId)
@@ -1109,6 +1197,56 @@ export class Runner {
     return live.sessionID ?? task.sessionID
   }
 
+  /** Gives a synthesis create event the same bounded grace period as a task child. */
+  async #waitForSynthesisChild(
+    live: Extract<Live, { kind: "synthesis" }>,
+    phase: PhaseRecord,
+  ): Promise<string | undefined> {
+    for (let poll = 0; poll < CHILD_WAIT_POLLS && !this.#disposed; poll += 1) {
+      await this.#sleep(this.#deps.childPollMs ?? CHILD_POLL_MS)
+      const sessionID = live.sessionID ?? phase.synthesis?.sessionID
+      if (sessionID) return sessionID
+    }
+    return live.sessionID ?? phase.synthesis?.sessionID
+  }
+
+  /** Watches a synthesis whose executor returned after putting its child in the background. */
+  async #awaitSynthesisBackground(
+    run: RunRecord,
+    phase: PhaseRecord,
+    sessionID: string,
+    timeoutMs: number,
+    deadline: number,
+  ): Promise<{ status: "completed" | "failed"; output?: string; error?: string }> {
+    const interval = this.#deps.pollIntervalMs ?? POLL_MS
+    const until = this.#now() + Math.max(timeoutMs, 0)
+    while (!this.#disposed && this.#now() < until) {
+      if (this.#halted(run.runId)) {
+        return { status: "failed", error: this.#cancelled.has(run.runId) ? "the synthesis was cancelled" : "the run hit its budget cap" }
+      }
+      if (await this.#outOfTime(run, deadline)) {
+        return { status: "failed", error: `the run passed its limit of ${this.#deps.config.maxRunMinutes} minutes and was stopped` }
+      }
+      const info = await this.#deps.session.get({ sessionID }).catch(() => undefined)
+      const outcome = typeof info?.outcome === "string" ? info.outcome : undefined
+      if (outcome) {
+        const output = await this.#lastAssistantText(sessionID)
+        if (outcome === "succeeded" && output.trim()) return { status: "completed", output }
+        return {
+          status: "failed",
+          error: outcome === "succeeded" ? "the synthesis ended without an answer" : `the synthesis session ended: ${outcome}`,
+        }
+      }
+      await this.#sleep(interval)
+    }
+    if (this.#disposed) return { status: "failed", error: "the synthesis was cancelled" }
+    if (await this.#outOfTime(run, deadline)) {
+      return { status: "failed", error: `the run passed its limit of ${this.#deps.config.maxRunMinutes} minutes and was stopped` }
+    }
+    await this.#deps.session.interrupt({ sessionID, continue: false }).catch(() => {})
+    return { status: "failed", error: `the synthesis did not finish within ${timeoutMs} ms` }
+  }
+
   /**
    * Watches a member the lead moved to the background.
    *
@@ -1178,6 +1316,20 @@ export class Runner {
     await this.#deps.store.recordUsage(run.runId, task.taskId, task.sessionID, {
       usd: typeof info.cost === "number" ? info.cost : 0,
       tokens: countTokens(info.tokens),
+    })
+  }
+
+  /** The visible synthesis child carries detailed authoritative usage. */
+  async #readSynthesisUsage(run: RunRecord, phase: PhaseRecord, sessionID: string): Promise<void> {
+    const info = await this.#deps.session.get({ sessionID }).catch(() => undefined)
+    if (!info) return
+    const tokens = info.tokens as Record<string, unknown> | undefined
+    await this.#deps.store.recordSynthesisUsage(run.runId, phase.id, sessionID, {
+      input: token(tokens?.input),
+      output: token(tokens?.output),
+      reasoning: token(tokens?.reasoning),
+      cache: cacheTokens(tokens?.cache),
+      cost: typeof info.cost === "number" ? info.cost : 0,
     })
   }
 
@@ -1399,6 +1551,10 @@ function markOrphaned(run: RunRecord, reason: string): void {
   run.error = reason
   for (const phase of run.phases) {
     if (phase.status === "running") phase.status = "partial"
+    if (phase.synthesis?.status === "running") {
+      phase.synthesis.status = "failed"
+      phase.synthesis.error = reason
+    }
     for (const task of phase.tasks) {
       if (task.status !== "running") continue
       task.status = "cancelled"
@@ -1441,6 +1597,7 @@ function resetForResume(run: RunRecord): void {
     if (!whole) phase.synthesis = undefined
     phase.error = undefined
   }
+  recount(run)
 }
 
 /** Whether the last round of a repeat phase was refused and the phase has rounds left. */
@@ -1532,6 +1689,16 @@ function clamp(value: number, min: number, max: number): number {
 
 function clip(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}\n[cut at ${limit} characters]`
+}
+
+function token(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+function cacheTokens(value: unknown): number {
+  if (typeof value === "number") return token(value)
+  if (!value || typeof value !== "object") return 0
+  return Object.values(value as Record<string, unknown>).reduce<number>((total, entry) => total + token(entry), 0)
 }
 
 function describe(error: unknown): string {

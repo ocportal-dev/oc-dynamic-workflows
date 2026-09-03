@@ -41,5 +41,6 @@ it("carries the roles, the review gates, the built-in workflows, and plan mode",
   for (const name of TEMPLATE_NAMES) expect(body, name).toContain(name)
   for (const role of ROLE_NAMES) expect(body, role).toContain(`\`${role}\``)
   expect(body).toContain("Set a role's model in the plugin options, not in the spec")
+  expect(body).toContain("The synthesizer instead follows\n`options.synthesisModel`")
   expect(body).toContain('"repeat": { "gate": "<task id>", "maxRounds": 3 }')
 })

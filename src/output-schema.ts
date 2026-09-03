@@ -1,8 +1,8 @@
 /**
  * A small JSON Schema subset, used to check what a task replied with.
  *
- * `ctx.generate.text` takes a prompt and nothing else, so a schema cannot be enforced by
- * the model call. The task output is searched for a JSON object instead, and that object
+ * A member's output is plain text, so a schema cannot be enforced by the host. The task output
+ * is searched for a JSON object instead, and that object
  * is checked here. Only these keywords are read: `type`, `properties`, `required`,
  * `items`, `enum`, and `additionalProperties`. Anything else in the schema is ignored.
  */

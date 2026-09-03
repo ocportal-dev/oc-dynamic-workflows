@@ -79,3 +79,27 @@ it("caps the index at 200 entries and keeps every running one", async () => {
   // The oldest terminal runs were dropped to make room.
   expect(index.some((entry) => entry.runId === "wf_0")).toBe(false)
 })
+
+it("counts visible synthesis usage in the run budget", async () => {
+  const world = storage()
+  const run = record("wf_synthesis", "running")
+  run.phases = [
+    {
+      id: "phase",
+      strategy: "sequential",
+      status: "running",
+      tasks: [],
+      synthesis: { status: "running" },
+    },
+  ]
+  await world.store.put(run)
+  await world.store.recordSynthesisUsage("wf_synthesis", "phase", "ses_summary", {
+    input: 10,
+    output: 20,
+    reasoning: 30,
+    cache: 40,
+    cost: 0.75,
+  })
+  expect(run.phases[0]!.synthesis).toMatchObject({ sessionID: "ses_summary" })
+  expect(run.budget).toEqual({ spentUsd: 0.75, spentTokens: 60 })
+})

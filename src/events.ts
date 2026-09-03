@@ -13,7 +13,7 @@ export interface EventDeps {
   /** Marks a steer delivered once the member's inbox took it. */
   mailbox?: { observeDelivered: (inboxID: string) => void }
   /** Told when a member arrived in its worktree, so the waiter of the move resolves. */
-  runner?: { observeMoved: (sessionID: string) => void }
+  runner?: { observeMoved: (sessionID: string) => void; checkBudget: (runId: string) => Promise<void> }
 }
 
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000]
@@ -83,11 +83,17 @@ async function route(event: unknown, deps: EventDeps): Promise<void> {
 
   if (type === "session.usage.updated") {
     const member = deps.roster.member(sessionID)
-    if (!member) return
-    await deps.store.recordUsage(member.runId, member.taskId, sessionID, {
-      usd: typeof payload.cost === "number" ? payload.cost : 0,
-      tokens: countTokens(payload.tokens),
-    })
+    if (member) {
+      await deps.store.recordUsage(member.runId, member.taskId, sessionID, {
+        usd: typeof payload.cost === "number" ? payload.cost : 0,
+        tokens: countTokens(payload.tokens),
+      })
+      return
+    }
+    const synthesis = deps.roster.synthesis(sessionID)
+    if (!synthesis) return
+    await deps.store.recordSynthesisUsage(synthesis.runId, synthesis.phaseId, sessionID, usage(payload))
+    await deps.runner?.checkBudget(synthesis.runId)
     return
   }
 
@@ -133,6 +139,24 @@ export function countTokens(value: unknown): number {
   if (!value || typeof value !== "object") return 0
   const tokens = value as { input?: unknown; output?: unknown; reasoning?: unknown }
   return number(tokens.input) + number(tokens.output) + number(tokens.reasoning)
+}
+
+/** The persisted synthesis shape keeps cache detail as well as billed token categories. */
+function usage(payload: Record<string, unknown>): { input: number; output: number; reasoning: number; cache: number; cost: number } {
+  const tokens = payload.tokens as Record<string, unknown> | undefined
+  return {
+    input: number(tokens?.input),
+    output: number(tokens?.output),
+    reasoning: number(tokens?.reasoning),
+    cache: cacheTokens(tokens?.cache),
+    cost: number(payload.cost),
+  }
+}
+
+function cacheTokens(value: unknown): number {
+  if (typeof value === "number") return number(value)
+  if (!value || typeof value !== "object") return 0
+  return Object.values(value as Record<string, unknown>).reduce<number>((total, entry) => total + number(entry), 0)
 }
 
 function number(value: unknown): number {

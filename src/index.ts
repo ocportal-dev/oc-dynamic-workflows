@@ -49,8 +49,6 @@ export default Plugin.define({
         mailbox,
         activeRuns: live,
         directory: ctx.location.directory,
-        // `Model.Ref` carries branded strings, so the plain ref is cast once here.
-        generate: (input) => ctx.generate.text(input as never),
       })
       return { runs, roster, spawner, mailbox, runner, live }
     })

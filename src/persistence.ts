@@ -3,6 +3,8 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { MailEvent, RunRecord, TaskRecord } from "./types.js"
 
+type SynthesisUsage = { input: number; output: number; reasoning: number; cache: number; cost: number }
+
 /** `ctx.storage`, reduced to the calls the store makes. */
 export interface Storage {
   get: (key: string) => Promise<unknown>
@@ -148,6 +150,21 @@ export class RunStore {
     await this.put(run)
   }
 
+  /** Records the authoritative usage of a phase's visible synthesis child session. */
+  async recordSynthesisUsage(runId: string, phaseId: string, sessionID: string, usage: SynthesisUsage): Promise<void> {
+    const run = await this.get(runId)
+    const phase = run?.phases.find((candidate) => candidate.id === phaseId)
+    if (!run || !phase) return
+    phase.synthesisAttemptsUsage = { ...phase.synthesisAttemptsUsage, [sessionID]: usage }
+    phase.synthesisUsage = sumSynthesisUsages(Object.values(phase.synthesisAttemptsUsage))
+    if (phase.synthesis) {
+      phase.synthesis.sessionID = sessionID
+      phase.synthesis.usage = usage
+    }
+    recount(run)
+    await this.put(run)
+  }
+
   /**
    * A mirror is a convenience for debugging, so a write failure is ignored.
    *
@@ -213,14 +230,38 @@ export function findTask(run: RunRecord, taskId: string): TaskRecord | undefined
   return undefined
 }
 
-/** The budget is the usage of every task plus what the lead spent on the mailbox. */
-function recount(run: RunRecord): void {
-  run.budget.spentUsd = sum(run, (task) => task.usage.usd) + (run.mailUsage?.usd ?? 0)
-  run.budget.spentTokens = sum(run, (task) => task.usage.tokens) + (run.mailUsage?.tokens ?? 0)
+/** The budget is the usage of tasks, visible synthesis children, and mailbox wakes. */
+export function recount(run: RunRecord): void {
+  run.budget.spentUsd = sum(run, (task) => task.usage.usd) + synthesisCost(run) + (run.mailUsage?.usd ?? 0)
+  run.budget.spentTokens = sum(run, (task) => task.usage.tokens) + synthesisTokens(run) + (run.mailUsage?.tokens ?? 0)
 }
 
 function sum(run: RunRecord, read: (task: TaskRecord) => number): number {
   let total = 0
   for (const phase of run.phases) for (const task of phase.tasks) total += read(task)
   return total
+}
+
+function sumSynthesisUsages(usages: SynthesisUsage[]): SynthesisUsage {
+  return usages.reduce(
+    (total, u) => ({
+      input: total.input + u.input,
+      output: total.output + u.output,
+      reasoning: total.reasoning + u.reasoning,
+      cache: total.cache + u.cache,
+      cost: total.cost + u.cost,
+    }),
+    { input: 0, output: 0, reasoning: 0, cache: 0, cost: 0 },
+  )
+}
+
+function synthesisCost(run: RunRecord): number {
+  return run.phases.reduce((total, phase) => total + (phase.synthesisUsage?.cost ?? phase.synthesis?.usage?.cost ?? 0), 0)
+}
+
+function synthesisTokens(run: RunRecord): number {
+  return run.phases.reduce((total, phase) => {
+    const usage = phase.synthesisUsage ?? phase.synthesis?.usage
+    return total + (usage?.input ?? 0) + (usage?.output ?? 0) + (usage?.reasoning ?? 0)
+  }, 0)
 }

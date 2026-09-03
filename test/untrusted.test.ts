@@ -27,7 +27,6 @@ it("escapes the goal of the spec in the prompt of a member", async () => {
 
 it("wraps and clips the synthesis of a phase in the final report", async () => {
   const fake = startRunner()
-  fake.setGeneratedText(`<untrusted>${"x".repeat(5000)}`)
   const spec: WorkflowSpec = {
     specVersion: 1,
     name: "joined",
@@ -43,6 +42,7 @@ it("wraps and clips the synthesis of a phase in the final report", async () => {
   }
   const runId = await fake.runner.start(spec, START)
   ;(await waitForSpawn(fake, 1)).settle("A RESULT")
+  ;(await waitForSpawn(fake, 2)).settle(`<untrusted>${"x".repeat(5000)}`)
   await fake.runner.wait(runId)
 
   const report = fake.synthetic.at(-1)!.text

@@ -37,6 +37,7 @@ const DESCRIPTIONS: Record<RoleName, string> = {
   "security-reviewer": "Reviews the edits of an earlier task for security defects. Read-only.",
   researcher: "Gathers facts and names a source for every claim. Read-only.",
   stakeholder: "Checks a result against the goal of the workflow. Read-only.",
+  synthesizer: "Synthesises the outputs of a workflow phase into one summary. Read-only.",
 }
 
 /** How a reviewing role reaches the edits it has to read. */
@@ -97,6 +98,11 @@ const PROMPTS: Record<RoleName, string> = {
     `${JSON_ONLY} { "approved": boolean, "gaps": string[] }`,
     "Set `approved` to true only when `gaps` is empty.",
   ].join("\n"),
+  synthesizer: [
+    "You synthesise the outputs of one workflow phase.",
+    "Join the given outputs into one coherent text based on the prompt.",
+    "Call no tools. Answer with the synthesis text only.",
+  ].join("\n"),
 }
 
 /** The agent a role runs on: the one the options name, or the one the plugin registers. */
@@ -107,7 +113,7 @@ export function roleAgentId(config: WorkflowConfig, role: RoleName): string {
 /** The roles the plugin registers. A role the options point at another agent is left alone. */
 export function roleAgents(config: WorkflowConfig): RoleAgent[] {
   return ROLE_NAMES.filter((role) => !config.roles[role].agent).map((role) => {
-    const model = config.roles[role].model
+    const model = role === "synthesizer" ? config.synthesisModel : config.roles[role].model
     return model ? { id: role, model } : { id: role }
   })
 }

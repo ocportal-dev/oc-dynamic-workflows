@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test"
+import { describeSynthesis } from "../src/roster.js"
 import type { WorkflowSpec } from "../src/types.js"
 import { LEAD, LEAD_AGENT, startRunner, waitForSpawn } from "./fake.js"
 
@@ -149,7 +150,6 @@ it("takes the concurrency from the run overrides", async () => {
 
 it("synthesises a phase and passes the summary, not the outputs, to the next phase", async () => {
   const fake = startRunner({ options: { concurrency: 2 } })
-  fake.setGeneratedText("alpha, beta")
   const spec = parallel(2, "List the words you were given, comma separated")
   spec.phases.push({
     id: "write",
@@ -160,15 +160,18 @@ it("synthesises a phase and passes the summary, not the outputs, to the next pha
   const runId = await fake.runner.start(spec, START)
   ;(await waitForSpawn(fake, 1)).settle("ALPHA OUTPUT")
   ;(await waitForSpawn(fake, 2)).settle("BETA OUTPUT")
-  const report = await waitForSpawn(fake, 3)
+  const synthesis = await waitForSpawn(fake, 3)
 
-  const prompt = fake.generated[0]!.prompt
-  expect(fake.generated).toHaveLength(1)
-  expect(prompt).toContain("List the words you were given, comma separated")
-  expect(prompt).toContain("collect the words")
-  expect(prompt).toContain("ALPHA OUTPUT")
-  expect(prompt).toContain("BETA OUTPUT")
-  expect(prompt).toContain('<untrusted source="agent" id="t1">')
+  expect(synthesis.input.agent).toBe("synthesizer")
+  expect(synthesis.input.description).toBe(describeSynthesis(runId, "words"))
+  expect(synthesis.input.prompt).toContain("List the words you were given, comma separated")
+  expect(synthesis.input.prompt).toContain("collect the words")
+  expect(synthesis.input.prompt).toContain("ALPHA OUTPUT")
+  expect(synthesis.input.prompt).toContain("BETA OUTPUT")
+  expect(synthesis.input.prompt).toContain('<untrusted source="agent" id="t1">')
+  synthesis.settle("alpha, beta")
+
+  const report = await waitForSpawn(fake, 4)
 
   expect(report.input.prompt).toContain("alpha, beta")
   expect(report.input.prompt).not.toContain("ALPHA OUTPUT")
@@ -176,7 +179,7 @@ it("synthesises a phase and passes the summary, not the outputs, to the next pha
 
   await fake.runner.wait(runId)
   const run = await fake.store.get(runId)
-  expect(run?.phases[0]!.synthesis).toEqual({ status: "completed", output: "alpha, beta" })
+  expect(run?.phases[0]!.synthesis).toMatchObject({ status: "completed", output: "alpha, beta" })
   expect(fake.synthetic[0]!.text).toContain("Synthesis of phase words:")
   expect(fake.synthetic[0]!.text).toContain("alpha, beta")
   await fake.stop()
@@ -184,20 +187,21 @@ it("synthesises a phase and passes the summary, not the outputs, to the next pha
 
 it("does not pass an empty summary on", async () => {
   const fake = startRunner()
-  fake.setGeneratedText("   ")
   const runId = await fake.runner.start(parallel(1, "summarise"), START)
   ;(await waitForSpawn(fake, 1)).settle("only output")
+  ;(await waitForSpawn(fake, 2)).settle("   ")
   await fake.runner.wait(runId)
 
   const run = await fake.store.get(runId)
-  expect(run?.phases[0]!.synthesis).toEqual({ status: "failed", error: "the generation returned no text" })
+  expect(run?.phases[0]!.synthesis).toMatchObject({ status: "failed", error: "the synthesis returned no text" })
   await fake.stop()
 })
 
-it("records a synthesis that cannot run without stopping the phase", async () => {
-  const fake = startRunner({ generate: false })
+it("records a synthesis executor error without stopping the phase", async () => {
+  const fake = startRunner()
   const runId = await fake.runner.start(parallel(1, "summarise"), START)
   ;(await waitForSpawn(fake, 1)).settle("only output")
+  ;(await waitForSpawn(fake, 2)).fail("the synthesis exploded")
   await fake.runner.wait(runId)
 
   const run = await fake.store.get(runId)
@@ -206,18 +210,110 @@ it("records a synthesis that cannot run without stopping the phase", async () =>
   await fake.stop()
 })
 
-it("runs the synthesis on the model the options name, and on the default without one", async () => {
+it("runs synthesis on the configured synthesizer agent", async () => {
   const fake = startRunner({ options: { synthesisModel: "openai/gpt-5" } })
   const runId = await fake.runner.start(parallel(1, "summarise"), START)
   ;(await waitForSpawn(fake, 1)).settle("only output")
+  expect((await waitForSpawn(fake, 2)).input.agent).toBe("synthesizer")
+  ;(await waitForSpawn(fake, 2)).settle("summary")
   await fake.runner.wait(runId)
-  expect(fake.generated[0]!.model).toEqual({ providerID: "openai", id: "gpt-5" })
   await fake.stop()
+})
 
-  const plain = startRunner()
-  const other = await plain.runner.start(parallel(1, "summarise"), START)
-  ;(await waitForSpawn(plain, 1)).settle("only output")
-  await plain.runner.wait(other)
-  expect(Object.keys(plain.generated[0]!)).toEqual(["prompt"])
-  await plain.stop()
+it("charges the synthesizer's authoritative session usage when it settles", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(parallel(1, "summarise"), START)
+  ;(await waitForSpawn(fake, 1)).settle("only output")
+  const synthesis = await waitForSpawn(fake, 2)
+  fake.sessions.set(synthesis.childID, {
+    cost: 0.7,
+    tokens: { input: 10, output: 20, reasoning: 30, cache: { read: 4, write: 5 } },
+  })
+  synthesis.settle("summary")
+  await fake.runner.wait(runId)
+
+  const run = await fake.store.get(runId)
+  expect(fake.gets).toContain(synthesis.childID)
+  expect(run?.phases[0]!.synthesis).toMatchObject({
+    status: "completed",
+    sessionID: synthesis.childID,
+    usage: { input: 10, output: 20, reasoning: 30, cache: 9, cost: 0.7 },
+  })
+  // The task's default authoritative 0.01/125 is included too.
+  expect(run?.budget).toEqual({ spentUsd: 0.71, spentTokens: 185 })
+  await fake.stop()
+})
+
+it("interrupts a synthesis that times out and charges its final session usage", async () => {
+  const fake = startRunner({ config: { defaultTaskTimeoutMs: 10 } })
+  const runId = await fake.runner.start(parallel(1, "summarise"), START)
+  ;(await waitForSpawn(fake, 1)).settle("only output")
+  const synthesis = await waitForSpawn(fake, 2)
+  fake.sessions.set(synthesis.childID, {
+    cost: 0.8,
+    tokens: { input: 3, output: 4, reasoning: 5, cache: { read: 6, write: 7 } },
+  })
+  await fake.runner.wait(runId)
+
+  const run = await fake.store.get(runId)
+  expect(fake.interrupts).toContain(synthesis.childID)
+  expect(fake.gets).toContain(synthesis.childID)
+  expect(run?.phases[0]!.synthesis).toMatchObject({
+    status: "failed",
+    sessionID: synthesis.childID,
+    error: "the synthesis did not finish within 10 ms",
+    usage: { input: 3, output: 4, reasoning: 5, cache: 13, cost: 0.8 },
+  })
+  expect(run?.budget).toEqual({ spentUsd: 0.81, spentTokens: 137 })
+  await fake.stop()
+})
+
+it("interrupts an in-flight synthesis when its usage crosses the budget", async () => {
+  const fake = startRunner()
+  const spec = parallel(1, "summarise")
+  spec.budget = { usd: 0.02 }
+  const runId = await fake.runner.start(spec, START)
+  ;(await waitForSpawn(fake, 1)).settle("only output")
+  const synthesis = await waitForSpawn(fake, 2)
+  fake.emit({
+    type: "session.usage.updated",
+    data: {
+      sessionID: synthesis.childID,
+      cost: 1,
+      tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 2, write: 3 } },
+    },
+  })
+  await fake.runner.wait(runId)
+
+  expect(fake.interrupts).toContain(synthesis.childID)
+  const run = await fake.store.get(runId)
+  expect(run?.status).toBe("partial")
+  expect(run?.phases[0]!.synthesis).toMatchObject({ status: "failed", sessionID: synthesis.childID })
+  await fake.stop()
+})
+
+it("interrupts an in-flight synthesis when the run is cancelled and charges its final session usage", async () => {
+  const fake = startRunner()
+  const runId = await fake.runner.start(parallel(1, "summarise"), START)
+  ;(await waitForSpawn(fake, 1)).settle("only output")
+  const synthesis = await waitForSpawn(fake, 2)
+  fake.sessions.set(synthesis.childID, {
+    cost: 0.9,
+    tokens: { input: 12, output: 14, reasoning: 16, cache: { read: 2, write: 3 } },
+  })
+  await fake.runner.cancel({ runId })
+  await fake.runner.wait(runId)
+
+  const run = await fake.store.get(runId)
+  expect(fake.interrupts).toContain(synthesis.childID)
+  expect(fake.gets).toContain(synthesis.childID)
+  expect(run?.phases[0]!.synthesis).toMatchObject({
+    status: "failed",
+    sessionID: synthesis.childID,
+    error: "the synthesis was cancelled",
+    usage: { input: 12, output: 14, reasoning: 16, cache: 5, cost: 0.9 },
+  })
+  expect(run?.status).toBe("cancelled")
+  expect(run?.budget).toEqual({ spentUsd: 0.91, spentTokens: 167 })
+  await fake.stop()
 })

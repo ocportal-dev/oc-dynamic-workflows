@@ -195,7 +195,7 @@ it("disposes every registration on cleanup", async () => {
 it("registers one read-only subagent per role", async () => {
   const fake = await startPlugin()
   const roles = fake.agents.filter((agent) => agent.id !== "general")
-  expect(roles.map((agent) => agent.id)).toEqual(["reviewer", "security-reviewer", "researcher", "stakeholder"])
+  expect(roles.map((agent) => agent.id)).toEqual(["reviewer", "security-reviewer", "researcher", "stakeholder", "synthesizer"])
   for (const agent of roles) {
     expect(agent.mode, agent.id).toBe("subagent")
     expect(agent.system, agent.id).toBeTruthy()
