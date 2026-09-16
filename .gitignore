@@ -17,3 +17,7 @@ node_modules/
 # Package lock
 package-lock.json
 bun.lock
+
+# Workflow engine output (saved specs in .opencode/workflows/*.json stay tracked)
+.opencode/workflows/runs/
+.opencode/workflows/worktrees/
