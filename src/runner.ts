@@ -26,7 +26,7 @@ import type {
 /** `ctx.session`, reduced to the calls the runner makes. */
 export interface RunnerSession {
   get: (input: { sessionID: string }) => Promise<{ cost?: number; tokens?: unknown; outcome?: unknown } | undefined>
-  interrupt: (input: { sessionID: string; continue: boolean }) => Promise<unknown>
+  interrupt: (input: { sessionID: string; resume: boolean }) => Promise<unknown>
   /** Moves a session to another directory. The move lands at its next step boundary. */
   move: (input: { sessionID: string; directory: string }) => Promise<unknown>
   synthetic: (input: {
@@ -278,7 +278,7 @@ export class Runner {
   /**
    * Records that a member was force-steered.
    *
-   * `interrupt({ continue: true })` ends the member's current step, and that rejects the
+   * `interrupt({ resume: true })` ends the member's current step, and that rejects the
    * spawn promise the same way a cancel does. The member goes on with the steered items,
    * so the task is watched through its session instead of being called failed.
    */
@@ -398,7 +398,7 @@ export class Runner {
   async #interruptResurrected(sessionID: string): Promise<void> {
     const info = await this.#deps.session.get({ sessionID }).catch(() => undefined)
     if (!info || info.outcome) return
-    await this.#deps.session.interrupt({ sessionID, continue: false }).catch(() => {})
+    await this.#deps.session.interrupt({ sessionID, resume: false }).catch(() => {})
   }
 
   /**
@@ -1267,7 +1267,7 @@ export class Runner {
     if (await this.#outOfTime(run, deadline)) {
       return { status: "failed", error: `the run passed its limit of ${this.#deps.config.maxRunMinutes} minutes and was stopped` }
     }
-    await this.#deps.session.interrupt({ sessionID, continue: false }).catch(() => {})
+    await this.#deps.session.interrupt({ sessionID, resume: false }).catch(() => {})
     return { status: "failed", error: `the synthesis did not finish within ${timeoutMs} ms` }
   }
 
@@ -1315,7 +1315,7 @@ export class Runner {
       await this.#sleep(interval)
     }
     if (this.#disposed) return { status: "cancelled", raw: "" }
-    await this.#deps.session.interrupt({ sessionID, continue: false }).catch(() => {})
+    await this.#deps.session.interrupt({ sessionID, resume: false }).catch(() => {})
     task.error = `the task did not finish within ${timeoutMs} ms`
     return { status: "timeout", raw: "" }
   }

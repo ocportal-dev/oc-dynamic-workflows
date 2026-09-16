@@ -1,4 +1,6 @@
 import { expect, it } from "bun:test"
+import { Skill } from "@opencode/plugin"
+import { Schema } from "effect"
 import { ROLE_NAMES } from "../src/config.js"
 import { TEMPLATE_NAMES } from "../src/templates.js"
 import { startPlugin } from "./fake.js"
@@ -9,10 +11,24 @@ it("registers the workflow skill with a listing entry short enough to carry", as
   const [skill] = fake.skills
   expect(skill!.description.length).toBeLessThan(200)
   expect(skill!.description).toContain("parallel")
-  // A location that ends in SKILL.md makes the host scan a sibling directory instead.
-  expect(skill!.location.endsWith("SKILL.md")).toBe(false)
+  // A path that ends in SKILL.md makes the host scan a sibling directory instead.
+  expect(skill!.path.endsWith("SKILL.md")).toBe(false)
   // A `slash` flag would be shadowed by the command of the same name.
   expect("slash" in skill!).toBe(false)
+})
+
+it("registers a skill entry the host schema decodes", async () => {
+  // opencode v2.0.5 disabled the plugin with `SchemaError: Missing key at ["path"]` when the
+  // entry carried `location`. The host decodes the entry against `Skill.Info`, so the fake
+  // does the same instead of trusting the compile-time shape alone.
+  const fake = await startPlugin()
+  const [skill] = fake.skills
+  expect(Object.keys(skill!).sort()).toEqual(["content", "description", "id", "name", "path"])
+  expect(skill!.path.startsWith("/")).toBe(true)
+  const decode = Schema.decodeUnknownSync(Skill.Info)
+  expect(() => decode(skill)).not.toThrow()
+  const { path, ...withLocation } = skill!
+  expect(() => decode({ ...withLocation, location: path })).toThrow(/Missing key/)
 })
 
 it("builds the skill body from the resolved options", async () => {

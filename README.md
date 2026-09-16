@@ -3,7 +3,7 @@
 An opencode plugin that lets an agent write a small JSON workflow, fan the tasks out to
 child sessions, and join the results.
 
-> Requires OpenCode v2 (`opencode2`, plugin API `0.0.0-beta-18743`).
+> Requires OpenCode v2 (`opencode2`, plugin API `@opencode/plugin@2.0.5`).
 
 It runs `sequential`, `parallel`, and `team` phases. A `team` phase runs its tasks side by
 side with a mailbox open, so a member can ask the lead a question while it works and the

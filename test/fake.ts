@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode/plugin"
 import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -91,7 +91,7 @@ function makeWorld() {
   const messages = new Map<string, unknown[]>()
   /** What `ctx.agent.list` answers, and what `ctx.agent.transform` writes into. */
   const agents: MutableAgent[] = [{ id: "general", name: "general", mode: "subagent", permissions: [] }]
-  /** What `ctx.catalog.model.list` answers. A test pushes the model it wants listed. */
+  /** What `ctx.model.list` answers. A test pushes the model it wants listed. */
   const models: { id: string; modelID: string; providerID: string }[] = []
   /** What `ctx.plugin.list` answers. A test pushes the entry of a plugin it wants seen. */
   const plugins: Record<string, unknown>[] = []
@@ -169,7 +169,7 @@ function makeWorld() {
   const moves: { sessionID: string; directory: string }[] = []
   let moveFails = false
   let moveDelayMs = 0
-  const interruptCalls: { sessionID: string; continue: boolean }[] = []
+  const interruptCalls: { sessionID: string; resume: boolean }[] = []
   let inbox = 0
   const session = {
     get: async ({ sessionID }: { sessionID: string }) => {
@@ -178,10 +178,10 @@ function makeWorld() {
     },
     context: async ({ sessionID }: { sessionID: string }) =>
       messages.get(sessionID) ?? [{ id: "msg_lead", role: "assistant" }],
-    interrupt: async ({ sessionID, continue: resume }: { sessionID: string; continue?: boolean }) => {
+    interrupt: async ({ sessionID, resume }: { sessionID: string; resume?: boolean }) => {
       interrupts.push(sessionID)
-      interruptCalls.push({ sessionID, continue: resume === true })
-      // `continue: true` resumes the steered items, so the spawn is not cancelled. A child
+      interruptCalls.push({ sessionID, resume: resume === true })
+      // `resume: true` resumes the steered items, so the spawn is not cancelled. A child
       // can have been prompted more than once, and only the newest call is still pending.
       const pending = [...spawns].reverse().find((spawn) => spawn.childID === sessionID)
       if (!resume) pending?.fail(`Subagent cancelled (sessionID: ${sessionID})`)
@@ -394,7 +394,7 @@ export async function startPlugin(
         }
       },
     },
-    catalog: { model: { list: async () => ({ location: {}, data: world.models }) } },
+    model: { list: async () => ({ location: {}, data: world.models }) },
     plugin: { list: async () => ({ location: {}, data: world.plugins }) },
     event: { subscribe: world.subscribe },
     command: {

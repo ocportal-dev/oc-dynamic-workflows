@@ -44,7 +44,7 @@ export interface SpawnHandle {
 }
 
 export interface SpawnerDeps {
-  /** `ctx.session.interrupt({ sessionID, continue: false })`. */
+  /** `ctx.session.interrupt({ sessionID, resume: false })`. */
   interrupt: (sessionID: string) => Promise<unknown>
 }
 

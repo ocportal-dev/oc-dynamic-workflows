@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin, Skill } from "@opencode/plugin"
 import { workflowCommands } from "./commands.js"
 import { resolveConfig } from "./config.js"
 import { attach, detach } from "./engine.js"
@@ -26,7 +26,7 @@ export default Plugin.define({
     const attached = attach(prefix, () => {
       const runs = new RunStore(ctx.storage, prefix, ctx.location.directory)
       const roster = new Roster(async (sessionID) => ctx.session.get({ sessionID }))
-      const spawner = new Spawner({ interrupt: (sessionID) => ctx.session.interrupt({ sessionID, continue: false }) })
+      const spawner = new Spawner({ interrupt: (sessionID) => ctx.session.interrupt({ sessionID, resume: false }) })
       const live = new Set<string>()
       const mailbox = new Mailbox({
         session: ctx.session,
@@ -63,7 +63,7 @@ export default Plugin.define({
       roster,
       mailbox,
       agents: () => ctx.agent.list(),
-      models: () => ctx.catalog.model.list(),
+      models: () => ctx.model.list(),
       plugins: () => ctx.plugin.list(),
     })
     // The host replays the transform on every reload, so the probe result is reported once.
@@ -83,8 +83,15 @@ export default Plugin.define({
         for (const command of workflowCommands({ session: ctx.session })) draft.add(command)
       }),
       // The listing entry costs one line per session; the body is fetched only when it is loaded.
+      // `Skill.Info` brands `id`, `name`, and `path`; the host decodes the entry against that schema.
       ctx.skill.transform((draft) => {
-        draft.add(workflowSkill(config) as never)
+        const skill = workflowSkill(config)
+        draft.add({
+          ...skill,
+          id: Skill.ID.make(skill.id),
+          name: Skill.Name.make(skill.name),
+          path: Skill.Info.fields.path.make(skill.path),
+        })
       }),
       // One subagent per role, so a role can carry its own model and its own denies.
       ctx.agent.transform((draft) => {

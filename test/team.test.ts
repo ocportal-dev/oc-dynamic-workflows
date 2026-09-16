@@ -216,7 +216,7 @@ it("interrupts the member first when the steer is forced", async () => {
 
   const result = await fake.mailbox.steer({ sessionID: LEAD, taskId: "a", body: "stop and answer", force: true })
   expect(result.ok === true && result.value.interrupted).toBe(true)
-  expect(fake.interruptCalls).toEqual([{ sessionID: spawn.childID, continue: true }])
+  expect(fake.interruptCalls).toEqual([{ sessionID: spawn.childID, resume: true }])
   expect(fake.prompts).toHaveLength(1)
 
   spawn.settle("done")

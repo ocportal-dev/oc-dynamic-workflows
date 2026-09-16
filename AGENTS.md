@@ -18,9 +18,10 @@ after a failure, a budget stop, a cancel, or a restart, and keeps every task tha
 completed. Three workflows are built in, so a build or a plan goal needs no hand-written
 spec.
 
-This package targets OpenCode v2 (`opencode2`) only. It depends on `@opencode-ai/plugin`
-at an exact beta version, pinned as a runtime dependency, because opencode installs
-published plugins with production dependencies only. `zod` is pinned to the same version
+This package targets OpenCode v2 (`opencode2`) only. It depends on `@opencode/plugin` at
+the exact version of the installed server (2.0.5), pinned as a runtime dependency, because
+opencode installs published plugins with production dependencies only. The older
+`@opencode-ai/plugin` betas describe a skill entry the 2.0.5 server rejects. `zod` is pinned to the same version
 the plugin package uses, so a schema is accepted as a `Tool.Info` input.
 
 ## Commands
@@ -35,7 +36,7 @@ bun test             # Run the test suite
 
 npm is the package manager. Bun is the test runner only. There is no linter.
 
-The user npm config sets `min-release-age=7`, which is newer than the pinned beta's
+The user npm config sets `min-release-age=7`, which can be newer than the pinned release's
 publish date. Install with `npm install --min-release-age=0`.
 
 ## Architecture
@@ -127,8 +128,8 @@ publish date. Install with `npm install --min-release-age=0`.
 
 ## OpenCode v2 API facts this code depends on
 
-Verified against `node_modules/@opencode-ai/plugin@0.0.0-beta-18743` and, where noted, in a
-live `opencode2` (spike S6).
+Verified against `node_modules/@opencode/plugin@2.0.5` and, where noted, in a live
+`opencode2` (spike S6).
 
 - `Plugin.define({ id, setup })` returns the plugin. `setup(ctx)` may return a cleanup
   function. `dist/promise/plugin.d.ts`.
@@ -137,10 +138,13 @@ live `opencode2` (spike S6).
 - The host replays every transform on reload, so the callback must be idempotent.
 - `ctx.skill.transform(callback)` works the same way. The draft has `list()`, `add(skill)`,
   `update(id, fn)`, and `remove(id)`, and `add` is a keyed set, so a replay is idempotent.
-- A skill is `{ id, name, description?, slash?, autoinvoke?, location, content }`
-  (`@opencode-ai/schema/dist/skill.d.ts`). `id`, `name`, and `location` are branded strings, and
-  `@opencode-ai/schema` is a transitive dependency, so `src/index.ts` casts the entry once.
-- `location` is a synthetic absolute path. The host scans the sibling directory of a skill only
+- A skill is `{ id, name, description?, autoinvoke?, path, content }`
+  (`@opencode/schema/dist/skill.d.ts`). `id`, `name`, and `path` are branded strings, and
+  `@opencode/schema` is a transitive dependency, so `src/index.ts` brands the three with
+  `Skill.ID.make`, `Skill.Name.make`, and `Skill.Info.fields.path.make`. The host decodes the
+  entry against `Skill.Info` and disables the plugin on a miss (`Missing key at ["path"]` was
+  the failure with the beta field name `location`); `test/skill.test.ts` runs that decode.
+- `path` is a synthetic absolute path. The host scans the sibling directory of a skill only
   when the basename is `SKILL.md`, so `/builtin/oc-dynamic-workflows/workflow.md` loads the
   inline `content` and nothing else.
 - The model sees only `id`, `name`, and `description` in the skill listing, once per session, so
@@ -174,10 +178,10 @@ live `opencode2` (spike S6).
     the child's last assistant text.
   - The child is created with `parentID = context.sessionID` and `model = agent.model ??
     parent.model`. The depth limit of 1 stops a child from spawning further children.
-  - `ctx.session.interrupt({ sessionID: child, continue: false })` makes the promise reject
+  - `ctx.session.interrupt({ sessionID: child, resume: false })` makes the promise reject
     with `Tool.Error: Subagent cancelled (sessionID: ...)`. Dropping the promise without
     interrupting leaks the child, so every path settles it.
-  - `continue: true` rejects that promise the same way, although the child lives on and
+  - `resume: true` rejects that promise the same way, although the child lives on and
     takes its steered items (verified live: the member's `shell` call ended
     `aborted: Tool execution interrupted`, then it answered the steer). A forced steer
     therefore tells the runner first, and the runner watches the member through
@@ -195,7 +199,7 @@ live `opencode2` (spike S6).
 - `ctx.session.prompt({ sessionID, text, delivery: "steer" })` admits a user item and never
   interrupts the step the session is in. It resolves with the inbox item, whose `id` is the
   `inboxID` of the later `session.inbox.delivered` event
-  (`data: { inboxID, sessionID }`). `ctx.session.interrupt({ sessionID, continue: true })`
+  (`data: { inboxID, sessionID }`). `ctx.session.interrupt({ sessionID, resume: true })`
   ends the current step and then resumes the steer-delivery items.
 - `ctx.session.move({ sessionID, directory, delivery? })` resolves the directory, boots the
   destination location instance, and admits an inbox control item. The move is applied at the
@@ -228,7 +232,7 @@ live `opencode2` (spike S6).
   an inner call runs `tool.execute.before` and the executor without the check above
   (`core/src/tool.ts:229-233`). A `tool.execute.before` from a promise plugin cannot fail
   cleanly either: the adapter wraps the callback in `Effect.promise`
-  (`@opencode-ai/plugin/dist/promise/adapter.js:352`), so a rejection is a defect, and the
+  (`@opencode/plugin/dist/promise/adapter.js`), so a rejection is a defect, and the
   direct path catches `Tool.Error` only (`core/src/session/runner/step.ts:122`) and then fails
   every unsettled tool call of the step (`step.ts:198-206`).
 - A phase synthesis is a real child session spawned through the captured `subagent` executor on
@@ -253,10 +257,10 @@ live `opencode2` (spike S6).
 - An `Agent.Info` also carries `model?: { providerID, id, variant? }`, `system?`, `description?`,
   and `permissions: { action, resource, effect }[]`. The string form of a model is
   `provider/model[#variant]`. `id`, `name`, and the model fields are branded, so `src/index.ts`
-  casts the draft agent once, the way it casts the skill entry.
+  casts the draft agent once.
 - The child of a spawn takes `agent.model ?? parent.model`, and the executor input carries no
   model, so a registered agent with a `model` is the only way to give a task its own model.
-- `ctx.catalog.model.list()` resolves to `{ location, data: Model.Info[] }`. A `Model.Info`
+- `ctx.model.list()` resolves to `{ location, data: Model.Info[] }`. A `Model.Info`
   carries `id`, `modelID`, and `providerID`, which is how `workflow_doctor` tells a model the
   catalog lists from one it does not.
 - `ctx.plugin.list()` resolves to `{ location, data: Plugin.Info[] }`, the shape
@@ -427,7 +431,7 @@ live `opencode2` (spike S6).
 - `$schema` is accepted at the edge and dropped by the normalizer, so a saved spec can point
   an editor at the schema and no spec ever carries the key onwards. The asset under `assets/`
   is generated, never hand-edited, and `test/schema.test.ts` fails when it drifts.
-- `@opencode-ai/plugin` and `zod` are pinned to exact versions and declared as runtime
+- `@opencode/plugin` and `zod` are pinned to exact versions and declared as runtime
   dependencies.
 
 ## Smoke test in a live opencode

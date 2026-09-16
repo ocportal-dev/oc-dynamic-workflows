@@ -17,7 +17,7 @@ export interface MailboxSession {
     resume?: boolean
   }) => Promise<unknown>
   prompt: (input: { sessionID: string; text: string; delivery?: "steer" | "queue" }) => Promise<unknown>
-  interrupt: (input: { sessionID: string; continue: boolean }) => Promise<unknown>
+  interrupt: (input: { sessionID: string; resume: boolean }) => Promise<unknown>
 }
 
 export interface MailboxDeps {
@@ -200,7 +200,7 @@ export class Mailbox {
     if (task.sessionID && task.status === "running") {
       if (input.force) {
         this.#deps.onForcedSteer?.(run.runId, task.taskId)
-        await this.#deps.session.interrupt({ sessionID: task.sessionID, continue: true }).catch(() => {})
+        await this.#deps.session.interrupt({ sessionID: task.sessionID, resume: true }).catch(() => {})
         interrupted = true
       }
       const admitted = await this.#deps.session

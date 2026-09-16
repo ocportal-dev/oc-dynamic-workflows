@@ -5,15 +5,15 @@ import { TEMPLATE_NAMES } from "./templates.js"
 /**
  * `ctx.skill.transform` draft entry, reduced to what this module builds.
  *
- * `@opencode-ai/schema` is a transitive dependency, not a declared one, and its
- * `Skill.Info` brands `id`, `name`, and `location`, so the call site casts once.
+ * `@opencode/schema` is a transitive dependency, not a declared one, and its `Skill.Info`
+ * brands `id`, `name`, and `path`, so the call site brands them once.
  */
 export interface SkillDefinition {
   id: string
   name: string
   description: string
-  /** A synthetic path. It must not end in `SKILL.md`, or the host scans a sibling directory. */
-  location: string
+  /** A synthetic absolute path. It must not end in `SKILL.md`, or the host scans a sibling directory. */
+  path: string
   content: string
 }
 
@@ -35,7 +35,7 @@ export function workflowSkill(config: WorkflowConfig): SkillDefinition {
     id: "workflow",
     name: "workflow",
     description: DESCRIPTION,
-    location: "/builtin/oc-dynamic-workflows/workflow.md",
+    path: "/builtin/oc-dynamic-workflows/workflow.md",
     content: body(config),
   }
 }

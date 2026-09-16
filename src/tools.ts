@@ -1,4 +1,4 @@
-import type { Info } from "@opencode-ai/plugin/promise/tool"
+import type { Info } from "@opencode/plugin/promise/tool"
 import { z } from "zod"
 import { formatModel, ROLE_NAMES, type ModelRef, type RoleName, type WorkflowConfig } from "./config.js"
 import { envelope, type Mailbox } from "./mailbox.js"
@@ -32,7 +32,7 @@ export interface ToolDeps {
   mailbox: Mailbox
   /** `ctx.agent.list`. Missing means the agent cannot be checked. */
   agents?: () => Promise<unknown>
-  /** `ctx.catalog.model.list`. Missing means a role model cannot be checked. */
+  /** `ctx.model.list`. Missing means a role model cannot be checked. */
   models?: () => Promise<unknown>
   /** `ctx.plugin.list`. Missing means the permission classifier cannot be checked. */
   plugins?: () => Promise<unknown>
@@ -628,7 +628,7 @@ async function listAgents(deps: ToolDeps): Promise<unknown[] | undefined> {
   return unwrapList(await deps.agents().catch(() => undefined))
 }
 
-/** `ctx.catalog.model.list` answers in the same shape. */
+/** `ctx.model.list` answers in the same shape. */
 async function listModels(deps: ToolDeps): Promise<unknown[] | undefined> {
   if (!deps.models) return undefined
   return unwrapList(await deps.models().catch(() => undefined))
